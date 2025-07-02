@@ -33,7 +33,7 @@
 //! Keep note that the slider LED indexes are in reverse order, so the first LED is on the right side of the slider,
 
 use crate::config::ChuniIoRgbConfig;
-use crate::feedback::FeedbackEvent;
+use crate::feedback::{FeedbackEvent, Rgb};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
 #[allow(dead_code)]
@@ -56,25 +56,6 @@ const CHUNI_LED_BOARD_DATA_LENS: [usize; LED_BOARDS_TOTAL] = [
     31 * 3, // Board 2: Slider LEDs
 ];
 
-/// RGB color value
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl From<(u8, u8, u8)> for Rgb {
-    fn from((r, g, b): (u8, u8, u8)) -> Self {
-        Self { r, g, b }
-    }
-}
-
-impl From<Rgb> for (u8, u8, u8) {
-    fn from(rgb: Rgb) -> Self {
-        (rgb.r, rgb.g, rgb.b)
-    }
-}
 
 /// LED board types with their specific data
 #[derive(Debug, Clone)]
@@ -381,12 +362,24 @@ impl Default for ChuniLedParser {
     }
 }
 
+/// Create FeedbackEvent from an array of LED RGB values
+/// note: Must already be prepared in proper RGB, transform if needed
+pub fn rgb_to_feedback_event(rgb: Rgb, led_id: u8) -> FeedbackEvent {
+    FeedbackEvent::Led(crate::feedback::LedEvent::Set {
+        led_id,
+        on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
+        brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
+        rgb: Some((rgb.r, rgb.g, rgb.b)),
+    })
+}
+
 /// Create and run a CHUNITHM RGB lightsync service
 pub async fn run_chuniio_service(
     config: ChuniIoRgbConfig,
     feedback_stream: crate::feedback::FeedbackEventStream,
+    rgb_stream: ChuniRgbStream,
 ) -> eyre::Result<()> {
-    let mut service = ChuniRgbService::new(config, feedback_stream);
+    let mut service = ChuniRgbService::new(config, feedback_stream, rgb_stream);
     service.run().await
 }
 
@@ -487,10 +480,40 @@ mod tests {
         }
     }
 }
+
+/// Stream for receiving parsed CHUNITHM RGB packets (not just raw RGB values)
+#[derive(Clone)]
+pub struct ChuniRgbStream {
+    /// Sender for LED data packets
+    pub tx: tokio::sync::mpsc::Sender<ChuniLedDataPacket>,
+    /// Receiver for LED data packets (wrapped for async use)
+    pub rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ChuniLedDataPacket>>>,
+}
+
+impl ChuniRgbStream {
+    /// Create a new stream with a bounded channel
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        Self {
+            tx,
+            rx: std::sync::Arc::new(tokio::sync::Mutex::new(rx)),
+        }
+    }
+
+    /// Send a LED data packet through the stream
+    pub async fn send(
+        &self,
+        packet: ChuniLedDataPacket,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ChuniLedDataPacket>> {
+        self.tx.send(packet).await
+    }
+}
+
 /// CHUNITHM RGB feedback service that listens on a Unix domain socket
 /// and processes JVS-like LED data packets
 pub struct ChuniRgbService {
     config: ChuniIoRgbConfig,
+    packet_stream: ChuniRgbStream,
     parser: ChuniLedParser,
     feedback_stream: crate::feedback::FeedbackEventStream,
 }
@@ -500,16 +523,19 @@ impl ChuniRgbService {
     pub fn new(
         config: ChuniIoRgbConfig,
         feedback_stream: crate::feedback::FeedbackEventStream,
+        rgb_stream: ChuniRgbStream,
     ) -> Self {
         Self {
             config,
             parser: ChuniLedParser::new(),
             feedback_stream,
+            packet_stream: rgb_stream,
         }
     }
-
+    
     /// Start the service and listen for LED data on the Unix domain socket
     pub async fn run(&mut self) -> eyre::Result<()> {
+        // todo: Don't actually manually create a socket listener here, just feed in packets from packet_stream
         tracing::info!(
             "Starting CHUNITHM RGB service listening on: {:?}",
             self.config.socket_path
@@ -672,12 +698,7 @@ impl ChuniRgbService {
             for (index, rgb) in processed_leds.iter().enumerate() {
                 let led_id = (index as u32 + self.config.slider_id_offset) as u8;
 
-                events.push(FeedbackEvent::Led(crate::feedback::LedEvent::Set {
-                    led_id,
-                    on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
-                    brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
-                    rgb: Some((rgb.r, rgb.g, rgb.b)),
-                }));
+                events.push(rgb_to_feedback_event(*rgb, led_id));
             }
 
             tracing::trace!(

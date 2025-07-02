@@ -6,6 +6,26 @@ use serde::{Deserialize, Serialize};
 
 pub mod generators;
 
+/// RGB color value
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl From<(u8, u8, u8)> for Rgb {
+    fn from((r, g, b): (u8, u8, u8)) -> Self {
+        Self { r, g, b }
+    }
+}
+
+impl From<Rgb> for (u8, u8, u8) {
+    fn from(rgb: Rgb) -> Self {
+        (rgb.r, rgb.g, rgb.b)
+    }
+}
+
 /// Represents a packet of feedback events, sent over a network or any other communication channel.
 /// (i.e WebSocket, Unix Domain Socket, etc.)
 ///

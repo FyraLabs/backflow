@@ -84,7 +84,7 @@
 //! All multi-byte integers are transmitted in little-endian format.
 
 use crate::config::ChuniIoRgbConfig;
-use crate::feedback::{FeedbackEvent, FeedbackEventPacket, FeedbackEventStream, LedEvent};
+use crate::feedback::{FeedbackEvent, FeedbackEventPacket, FeedbackEventStream, LedEvent, Rgb};
 use crate::input::{InputEvent, InputEventPacket, InputEventStream, KeyboardEvent};
 use crate::output::OutputBackend;
 use crate::protos::chuniio::{
@@ -912,16 +912,19 @@ impl InternalChuniioProxyServer {
     }
 }
 
-/// Helper function to create channels for the proxy server
-pub fn create_chuniio_channels() -> (
-    mpsc::UnboundedSender<ChuniInputEvent>,
-    mpsc::UnboundedReceiver<ChuniInputEvent>,
-    mpsc::UnboundedSender<ChuniFeedbackEvent>,
-    mpsc::UnboundedReceiver<ChuniFeedbackEvent>,
-) {
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let (feedback_tx, feedback_rx) = mpsc::unbounded_channel();
-    (input_tx, input_rx, feedback_tx, feedback_rx)
+/// Utility to convert these cursed BRG arrays to RGB
+#[inline(always)]
+fn brg_to_rgb(brg: &[u8; 3]) -> [u8; 3] {
+    [brg[2], brg[1], brg[0]]
+}
+
+fn rgb_from_brg(bgr: &[u8; 3]) -> Rgb {
+    let rgb = brg_to_rgb(bgr);
+    Rgb {
+        r: rgb[0],
+        g: rgb[1],
+        b: rgb[2],
+    }
 }
 
 #[cfg(test)]

@@ -236,28 +236,24 @@ impl Backend {
             .unwrap_or(false);
 
         if let Some(chuniio_config) = &self.config.feedback.chuniio {
-            if chuniio_proxy_enabled {
-                tracing::info!(
-                    "Skipping ChuniIO RGB feedback service - chuniio_proxy output backend is handling LED feedback"
-                );
-            } else {
-                tracing::info!(
-                    "Starting ChuniIO RGB feedback service on socket: {:?}",
-                    chuniio_config.socket_path
-                );
+            tracing::info!(
+                "Starting ChuniIO RGB feedback service on socket: {:?}",
+                chuniio_config.socket_path
+            );
 
-                let config = chuniio_config.clone();
-                let feedback_stream = self.streams.feedback.clone();
+            let config = chuniio_config.clone();
+            let feedback_stream = self.streams.feedback.clone();
+            // todo: configure this properly when using feedback chuniio_proxy
+            let rgb_stream = crate::feedback::generators::chuni_jvs::ChuniRgbStream::new();
 
-                let handle = tokio::spawn(async move {
-                    use crate::feedback::generators::chuni_jvs::run_chuniio_service;
-                    if let Err(e) = run_chuniio_service(config, feedback_stream).await {
-                        tracing::error!("ChuniIO RGB feedback service error: {}", e);
-                    }
-                });
+            let handle = tokio::spawn(async move {
+                use crate::feedback::generators::chuni_jvs::run_chuniio_service;
+                if let Err(e) = run_chuniio_service(config, feedback_stream, rgb_stream).await {
+                    tracing::error!("ChuniIO RGB feedback service error: {}", e);
+                }
+            });
 
-                self.feedback_handles.push(handle);
-            }
+            self.feedback_handles.push(handle);
         }
 
         Ok(())
