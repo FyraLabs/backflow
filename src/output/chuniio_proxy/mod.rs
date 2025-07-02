@@ -822,21 +822,27 @@ impl InternalChuniioProxyServer {
                 for (out_idx, &led_index) in led_indices.iter().enumerate() {
                     if let Some(brg_chunk) = led_blocks.get(led_index) {
                         if brg_chunk.len() == 3 {
-                            let r = brg_chunk[1];
-                            let g = brg_chunk[2];
-                            let b = brg_chunk[0];
-                            let led_event = FeedbackEvent::Led(LedEvent::Set {
-                                led_id: led_offset + out_idx as u8,
-                                on: r > 0 || g > 0 || b > 0,
-                                brightness: if r > 0 || g > 0 || b > 0 {
-                                    Some(255)
-                                } else {
-                                    Some(0)
-                                },
-                                rgb: Some((r, g, b)), // Store as (R, G, B) tuple
-                            });
+                            // let r = brg_chunk[1];
+                            // let g = brg_chunk[2];
+                            // let b = brg_chunk[0];
+                            if let Ok(brg_arr) = <&[u8; 3]>::try_from(*brg_chunk) {
+                                let rgb = rgb_from_brg(brg_arr);
+                                let r = rgb.r;
+                                let g = rgb.g;
+                                let b = rgb.b;
+                                let led_event = FeedbackEvent::Led(LedEvent::Set {
+                                    led_id: led_offset + out_idx as u8,
+                                    on: r > 0 || g > 0 || b > 0,
+                                    brightness: if r > 0 || g > 0 || b > 0 {
+                                        Some(255)
+                                    } else {
+                                        Some(0)
+                                    },
+                                    rgb: Some((r, g, b)), // Store as (R, G, B) tuple
+                                });
 
-                            packet.events.push(led_event);
+                                packet.events.push(led_event);
+                            }
                         }
                     }
                 }
