@@ -6,6 +6,7 @@ use crate::config::AppConfig;
 use crate::device_filter::DeviceFilter;
 use crate::feedback::FeedbackEventStream;
 use crate::feedback::generators::chuni_jvs::ChuniLedDataPacket;
+use crate::input::brokenithm::idevice_proxy::IproxyManager;
 use crate::input::{InputBackend, InputEventStream};
 use crate::output::{OutputBackend, OutputBackendType};
 use eyre::Result;
@@ -121,6 +122,38 @@ impl Backend {
 
     /// Start input services based on configuration
     fn start_input_services(&mut self) {
+        // idevice test service
+
+        // const BROKENITHM_PORT: u16 = 24864;
+        // self.service_manager.spawn(async move {
+        //     tracing::info!(
+        //         "Starting Brokenithm iDevice test service on port {}",
+        //         BROKENITHM_PORT
+        //     );
+        //     match IproxyManager::get_default_connection(BROKENITHM_PORT, "BrokenithmTest").await {
+        //         Ok(mut manager) => {
+        //             tracing::info!("Connected to iDevice: {:?}", manager.device);
+        //             // Here you can use the manager to interact with the idevice
+        //             // For example, you can take the idevice out of the manager
+        //             let idevice = manager.take_idevice();
+
+        //             if let Some(mut idevice) = idevice {
+        //                 while let Ok(packet) = idevice.read_any(1024).await {
+        //                     tracing::info!("Received packet from iDevice: {:?}", packet);
+        //                     // Process the packet as needed
+        //                 }
+        //                 // You can now use the idevice as needed
+        //             } else {
+        //                 tracing::warn!("No iDevice available in manager");
+        //             }
+        //         }
+        //         Err(e) => {
+        //             tracing::error!("Failed to connect to iDevice: {}", e);
+        //         }
+        //     }
+        // });
+        // end idevice test service
+
         // Start web input backend if configured and enabled
         if let Some(web_config) = &self.config.input.web {
             if web_config.enabled {

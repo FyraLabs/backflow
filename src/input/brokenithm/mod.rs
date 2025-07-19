@@ -15,8 +15,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
-mod idevice_proxy;
-use idevice_proxy::spawn_iproxy;
+pub mod idevice_proxy;
+use idevice_proxy::IproxyManager;
 
 /// Shared Brokenithm input state that can be polled by chuniio_proxy
 #[derive(Debug, Clone, PartialEq)]
@@ -207,114 +207,121 @@ impl BrokenithmTcpBackend {
         let feedback_stream_clone = feedback_stream.clone();
         let clients_clone = clients.clone();
 
-        tokio::spawn(async move {
-            loop {
-                match feedback_stream_clone.receive().await {
-                    Some(feedback) => {
-                        let led_msg = led_feedback_to_cled(&feedback);
-                        let mut to_remove = Vec::new();
-                        let clients_guard = clients_clone.read().await;
-                        for (idx, client_mutex) in clients_guard.iter().enumerate() {
-                            let mut client = client_mutex.lock().await;
-                            if let Err(e) = client.write_all(&led_msg).await {
-                                tracing::warn!("Failed to send feedback to client: {}", e);
-                                to_remove.push(idx);
-                            }
-                        }
-                        drop(clients_guard);
-                        if !to_remove.is_empty() {
-                            let mut clients_guard = clients_clone.write().await;
-                            for &idx in to_remove.iter().rev() {
-                                clients_guard.remove(idx);
-                            }
-                        }
-                    }
-                    None => {
-                        tracing::info!("Feedback stream closed, stopping feedback broadcast task");
-                        break;
-                    }
-                }
-            }
-        });
+        // tokio::spawn(async move {
+        //     loop {
+        //         match feedback_stream_clone.receive().await {
+        //             Some(feedback) => {
+        //                 let led_msg = led_feedback_to_cled(&feedback);
+        //                 let mut to_remove = Vec::new();
+        //                 let clients_guard = clients_clone.read().await;
+        //                 for (idx, client_mutex) in clients_guard.iter().enumerate() {
+        //                     let mut client = client_mutex.lock().await;
+        //                     if let Err(e) = client.write_all(&led_msg).await {
+        //                         tracing::warn!("Failed to send feedback to client: {}", e);
+        //                         to_remove.push(idx);
+        //                     }
+        //                 }
+        //                 drop(clients_guard);
+        //                 if !to_remove.is_empty() {
+        //                     let mut clients_guard = clients_clone.write().await;
+        //                     for &idx in to_remove.iter().rev() {
+        //                         clients_guard.remove(idx);
+        //                     }
+        //                 }
+        //             }
+        //             None => {
+        //                 tracing::info!("Feedback stream closed, stopping feedback broadcast task");
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // });
 
-        loop {
-            let (socket, addr) = listener.accept().await?;
-            tracing::info!("Accepted TCP connection from {}", addr);
-            let client_mutex = Arc::new(tokio::sync::Mutex::new(socket));
+        // loop {
+        //     let (socket, addr) = listener.accept().await?;
+        //     tracing::info!("Accepted TCP connection from {}", addr);
+        //     let client_mutex = Arc::new(tokio::sync::Mutex::new(socket));
 
-            // Register this client for feedback
-            {
-                let mut clients_guard = clients.write().await;
-                clients_guard.push(client_mutex.clone());
-            }
+        //     // Register this client for feedback
+        //     {
+        //         let mut clients_guard = clients.write().await;
+        //         clients_guard.push(client_mutex.clone());
+        //     }
 
-            let clients_for_removal = clients.clone();
-            let client_mutex_for_removal = client_mutex.clone();
+        //     let clients_for_removal = clients.clone();
+        //     let client_mutex_for_removal = client_mutex.clone();
 
-            tokio::spawn(async move {
-                Self::handle_connection(
-                    client_mutex,
-                    Some((clients_for_removal, client_mutex_for_removal)),
-                    Some(addr),
-                )
-                .await;
-            });
-        }
+        //     tokio::spawn(async move {
+        //         Self::handle_connection(
+        //             client_mutex,
+        //             Some((clients_for_removal, client_mutex_for_removal)),
+        //             Some(addr),
+        //         )
+        //         .await;
+        //     });
+        // }
+
+        Ok(())
     }
 
     async fn run_client(&mut self, connect_addr: SocketAddr) -> eyre::Result<()> {
+        // loop {
+        //     match TcpStream::connect(connect_addr).await {
+        //         Ok(socket) => {
+        //             tracing::info!("Connected to Brokenithm device at {}", connect_addr);
+        //             let socket = Arc::new(tokio::sync::Mutex::new(socket));
+        //             Self::handle_connection(socket, None, None).await;
+        //         }
+        //         Err(e) => {
+        //             tracing::error!(
+        //                 "Failed to connect to {}: {}. Retrying in 1s...",
+        //                 connect_addr,
+        //                 e
+        //             );
+        //             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        //         }
+        //     }
+        // }
         loop {
-            match TcpStream::connect(connect_addr).await {
-                Ok(socket) => {
-                    tracing::info!("Connected to Brokenithm device at {}", connect_addr);
-                    let socket = Arc::new(tokio::sync::Mutex::new(socket));
-                    Self::handle_connection(socket, None, None).await;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to connect to {}: {}. Retrying in 1s...",
-                        connect_addr,
-                        e
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
 
     async fn run_device_proxy(
         &mut self,
-        local_port: u16,
+        _local_port: u16,
         device_port: u16,
         udid: Option<&str>,
     ) -> eyre::Result<()> {
-        // Start iproxy (libimobiledevice) to forward device_port to local_port
-        let _iproxy_child = spawn_iproxy(local_port, device_port, udid).await?;
+        // Connect directly to the device using IproxyManager instead of spawning iproxy CLI
         tracing::info!(
-            "Started iproxy for device port {} -> localhost:{}",
+            "Connecting to iOS device port {} (UDID: {:?})",
             device_port,
-            local_port
+            udid
         );
 
-        // Connect to the local forwarded port
-        let connect_addr = format!("127.0.0.1:{}", local_port);
         loop {
-            match TcpStream::connect(&connect_addr).await {
-                Ok(socket) => {
-                    tracing::info!(
-                        "Connected to Brokenithm device via iproxy at {}",
-                        connect_addr
-                    );
-                    let socket = Arc::new(tokio::sync::Mutex::new(socket));
-                    Self::handle_connection(socket, None, None).await;
+            match IproxyManager::get_default_connection(device_port, "backflow-brokenithm").await {
+                Ok(mut manager) => {
+                    tracing::info!("Connected to iOS device: {:?}", manager.device);
+
+                    // Take the idevice connection out of the manager
+                    if let Some(idevice) = manager.take_idevice() {
+                        tracing::info!(
+                            "Successfully obtained device connection, starting Brokenithm protocol handler"
+                        );
+
+                        // Handle the idevice connection directly
+                        Self::handle_idevice_connection(idevice).await;
+                    } else {
+                        tracing::error!("Failed to take idevice from manager");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to connect to {}: {}. Retrying in 500ms...",
-                        connect_addr,
-                        e
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tracing::error!("Failed to connect to iOS device: {}. Retrying in 1s...", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
@@ -453,6 +460,124 @@ impl BrokenithmTcpBackend {
                 }
                 Err(e) => {
                     tracing::error!("TCP read error: {}", e);
+                    feedback_task.abort();
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn handle_idevice_connection(idevice: idevice::Idevice) {
+        // Start feedback listening task
+        let feedback_stream = crate::feedback::FeedbackEventStream::default();
+        let feedback_stream_clone = feedback_stream.clone();
+
+        // Create a shared reference to the idevice for feedback writes
+        let idevice_arc = Arc::new(tokio::sync::Mutex::new(idevice));
+        let idevice_arc_feedback = idevice_arc.clone();
+
+        let feedback_task = tokio::spawn(async move {
+            loop {
+                match feedback_stream_clone.receive().await {
+                    Some(feedback) => {
+                        // Skip LED feedback for now - idevice might not support writes in this mode
+                        let led_msg = led_feedback_to_cled(&feedback);
+                        let mut idevice_guard = idevice_arc_feedback.lock().await;
+                        if let Err(e) = idevice_guard.send_raw(&led_msg).await {
+                            tracing::warn!("Failed to send feedback to idevice: {}", e);
+                            break;
+                        }
+                    }
+                    None => {
+                        tracing::info!("Feedback stream closed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut buffer = Vec::new();
+        let mut state_tracker = BrokenithmInputStateTracker::new();
+
+        loop {
+            let mut idevice_guard = idevice_arc.lock().await;
+            let read_result = idevice_guard.read_raw(256).await;
+            drop(idevice_guard); // Always drop immediately after reading
+            match read_result {
+                Ok(data) if data.is_empty() => {
+                    tracing::info!("iDevice connection closed");
+                    feedback_task.abort();
+                    break;
+                }
+                Ok(data) => {
+                    // Append new data to buffer
+                    buffer.extend_from_slice(&data);
+
+                    // Extract and process all complete messages
+                    let (messages, consumed) = extract_brokenithm_messages(&buffer);
+                    for message in messages {
+                        tracing::trace!("Parsed message from iDevice: {:?}", message);
+
+                        match message {
+                            BrokenithmMessage::Input {
+                                air,
+                                slider,
+                                test_button,
+                                service_button,
+                            } => {
+                                if let Some(_packet) = state_tracker.diff_and_packet(
+                                    &air,
+                                    &slider,
+                                    test_button,
+                                    service_button,
+                                ) {
+                                    // Don't send input events when using shared state polling
+                                    // let _ = input_stream.send(packet).await;
+                                }
+                                // Always update shared state regardless of event emission
+                                state_tracker.update_shared_state(test_button, service_button);
+                                // Skip LED pattern for idevice - no write support in current implementation
+                                let led_msg = led_slider_active_pattern(&slider);
+                                let mut idevice_guard = idevice_arc.lock().await;
+                                let _ = idevice_guard.send_raw(&led_msg).await;
+                            }
+                            BrokenithmMessage::InsertCoin => {
+                                state_tracker.pulse_coin();
+                                let air = state_tracker.prev_air.clone();
+                                let slider = state_tracker.prev_slider.clone();
+                                let test_button = state_tracker.prev_test;
+                                let service_button = state_tracker.prev_service;
+                                if let Some(_packet) = state_tracker.diff_and_packet(
+                                    &air,
+                                    &slider,
+                                    test_button,
+                                    service_button,
+                                ) {
+                                    // Don't send input events when using shared state polling
+                                    // let _ = input_stream.send(packet).await;
+                                }
+                                // Always update shared state after coin pulse
+                                state_tracker.update_shared_state(test_button, service_button);
+                            }
+                            BrokenithmMessage::Welcome => {
+                                // Don't send test pattern after WEL message
+                                // Only slider-active pattern is sent after input updates
+                            }
+                            BrokenithmMessage::EnableAir(_)
+                            | BrokenithmMessage::TapCard
+                            | BrokenithmMessage::Unknown(_) => {
+                                // Do nothing
+                            }
+                        }
+                    }
+
+                    // Remove consumed bytes from buffer
+                    if consumed > 0 {
+                        buffer.drain(..consumed);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("iDevice read error: {}", e);
                     feedback_task.abort();
                     break;
                 }
