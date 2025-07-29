@@ -3,6 +3,7 @@
 //! such as WebSockets, MIDI, RS232, and others.
 
 use serde::{Deserialize, Serialize};
+pub mod atomic;
 pub mod brokenithm;
 pub mod unix_socket;
 pub mod web;

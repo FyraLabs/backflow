@@ -2,6 +2,7 @@
 //! Uses axum framework with tower middleware support.
 
 use crate::feedback::{FeedbackEventPacket, FeedbackEventStream};
+use crate::input::atomic::AtomicInputProcessor;
 use crate::input::{InputBackend, InputEventPacket, InputEventStream};
 use axum::{
     Router,
@@ -9,12 +10,13 @@ use axum::{
         ConnectInfo, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::{Json, Response},
     routing::get,
 };
 use eyre::{Context, Result};
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{debug, error, info, trace, warn};
@@ -28,54 +30,8 @@ pub struct WebSocketState {
     pub feedback_stream: FeedbackEventStream,
     pub connected_clients:
         Arc<RwLock<Vec<tokio::sync::mpsc::UnboundedSender<FeedbackEventPacket>>>>,
-    /// Track last processed timestamp per device to prevent out-of-order packets
-    pub last_timestamps: Arc<RwLock<HashMap<String, u64>>>,
-    /// Global sequence counter to ensure packet ordering across all connections
-    pub sequence_counter: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl WebSocketState {
-    /// Check if a packet should be processed based on its timestamp.
-    /// Returns true if the packet should be processed, false if it should be discarded.
-    /// Updates the last timestamp for the device if the packet is accepted.
-    async fn should_process_packet(&self, packet: &InputEventPacket) -> bool {
-        // Increment sequence counter for this packet processing attempt
-        let sequence_num = self
-            .sequence_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        let mut timestamps = self.last_timestamps.write().await;
-
-        match timestamps.get(&packet.device_id) {
-            Some(&last_timestamp) => {
-                if packet.timestamp < last_timestamp {
-                    // Packet is older than the last processed packet, discard it
-                    warn!(
-                        "Discarding out-of-order packet for device '{}': timestamp {} < last {} (seq: {})",
-                        packet.device_id, packet.timestamp, last_timestamp, sequence_num
-                    );
-                    return false;
-                }
-            }
-            None => {
-                // First packet for this device, always accept
-                debug!(
-                    "First packet for device '{}' with timestamp {} (seq: {})",
-                    packet.device_id, packet.timestamp, sequence_num
-                );
-            }
-        }
-
-        // Update the last timestamp for this device
-        timestamps.insert(packet.device_id.clone(), packet.timestamp);
-
-        trace!(
-            "Accepted packet for device '{}' with timestamp {} (seq: {})",
-            packet.device_id, packet.timestamp, sequence_num
-        );
-
-        true
-    }
+    /// Atomic input processor for handling cross-device batching and ordering
+    pub atomic_processor: Arc<AtomicInputProcessor>,
 }
 
 /// Web server that handles both WebSocket connections for input events
@@ -150,8 +106,7 @@ impl WebServer {
                                                         {
                                                             return Some(WebTemplateResponse {
                                                                 path: format!(
-                                                                    "custom/{}/{}",
-                                                                    dir_name, file_name
+                                                                    "custom/{dir_name}/{file_name}"
                                                                 ),
                                                                 name: dir_name.to_string(),
                                                             });
@@ -180,13 +135,17 @@ impl WebServer {
 
     /// Build the application router with all routes and return both the router and WebSocket state
     fn build_router(&self) -> (Router, WebSocketState) {
+        // Create atomic input processor for cross-device batching
+        let atomic_processor = Arc::new(AtomicInputProcessor::new(
+            crate::input::atomic::BatchingConfig::default(),
+        ));
+
         // Create shared state for bidirectional WebSocket communication
         let ws_state = WebSocketState {
             input_stream: self.event_stream.clone(),
             feedback_stream: self.feedback_stream.clone(),
             connected_clients: Arc::new(RwLock::new(Vec::new())),
-            last_timestamps: Arc::new(RwLock::new(HashMap::new())),
-            sequence_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            atomic_processor,
         };
 
         // Create the WebSocket router with WebSocket state
@@ -241,6 +200,24 @@ impl InputBackend for WebServer {
 
         // Build the router and get the WebSocket state
         let (router, ws_state) = self.build_router();
+
+        // Start the atomic processor flush timer
+        let mut flush_timer_rx = ws_state.atomic_processor.start_flush_timer();
+        let input_stream_for_flush = self.event_stream.clone();
+
+        let mut flush_task = tokio::spawn(async move {
+            while let Some(mut atomic_packet) = flush_timer_rx.recv().await {
+                // Restore original device_id from compound atomicity device_id
+                if let Some(at_pos) = atomic_packet.device_id.rfind('@') {
+                    atomic_packet.device_id = atomic_packet.device_id[..at_pos].to_string();
+                }
+
+                if let Err(e) = input_stream_for_flush.send(atomic_packet).await {
+                    error!("Failed to send atomic batch from flush timer: {}", e);
+                }
+            }
+            debug!("Atomic processor flush task stopped");
+        });
 
         // Clone the connected_clients reference for the feedback task
         let connected_clients_for_broadcast = ws_state.connected_clients.clone();
@@ -339,11 +316,16 @@ impl InputBackend for WebServer {
         // Run both the server and feedback broadcast task
         tokio::select! {
             result = server_task => {
+                flush_task.abort();
                 result.context("Server error")?;
             }
             _ = feedback_task => {
+                flush_task.abort();
                 info!("Feedback broadcast task ended (feedback stream closed)");
                 // This is not necessarily unexpected - could be normal shutdown
+            }
+            _ = &mut flush_task => {
+                info!("Atomic processor flush task ended");
             }
         }
 
@@ -454,8 +436,9 @@ mod tests {
             input_stream: input_stream.clone(),
             feedback_stream: feedback_stream.clone(),
             connected_clients: Arc::new(RwLock::new(Vec::new())),
-            last_timestamps: Arc::new(RwLock::new(HashMap::new())),
-            sequence_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            atomic_processor: Arc::new(AtomicInputProcessor::new(
+                crate::input::atomic::BatchingConfig::default(),
+            )),
         };
 
         // Test that we can create channels for both types
@@ -611,7 +594,7 @@ mod tests {
 
         // 2. Connect client
         info!("Step 2: Connecting WebSocket client");
-        let (ws_stream, _) = connect_async(format!("ws://{}/ws", addr))
+        let (ws_stream, _) = connect_async(format!("ws://{addr}/ws"))
             .await
             .expect("Failed to connect");
         let (mut write, _read) = ws_stream.split();
@@ -623,7 +606,7 @@ mod tests {
 
         // Generate all key press and release events up front
         for i in 0..NUM_KEYS {
-            let key = format!("STRESS_KEY_{}", i);
+            let key = format!("STRESS_KEY_{i}");
             key_events.push(InputEvent::Keyboard(KeyboardEvent::KeyPress {
                 key: key.clone(),
             }));
@@ -698,8 +681,7 @@ mod tests {
         }
         assert!(
             pressed_keys.is_empty(),
-            "Some keys are still pressed at the end: {:?}",
-            pressed_keys
+            "Some keys are still pressed at the end: {pressed_keys:?}"
         );
 
         // 6. Cleanup
@@ -716,6 +698,21 @@ pub mod examples {
     /// - **Input (Client → Server)**: Clients send JSON messages in the format of [`InputEventPacket`] for user input processing
     /// - **Feedback (Client → All Clients)**: Clients can send JSON messages in the format of [`FeedbackEventPacket`] to be broadcasted to all connected clients
     /// - **Feedback (Server → Client)**: Server broadcasts JSON messages in the format of [`FeedbackEventPacket`] to all connected clients
+    ///
+    /// ## Write-Only Mode
+    ///
+    /// Clients can opt out of receiving feedback events by including the header `X-Backflow-Write-Only: true`
+    /// when upgrading the WebSocket connection. This saves bandwidth for input-only applications:
+    ///
+    /// ```
+    /// GET /ws HTTP/1.1
+    /// Host: localhost:8000
+    /// Upgrade: websocket
+    /// Connection: Upgrade
+    /// X-Backflow-Write-Only: true
+    /// Sec-WebSocket-Key: ...
+    /// Sec-WebSocket-Version: 13
+    /// ```
     ///
     /// ## Input Message Example (Client sends to Server)
     ///
@@ -811,13 +808,32 @@ pub mod examples {
 
 /// Bidirectional WebSocket handler that processes input events from clients
 /// and broadcasts feedback events to all connected clients.
+///
+/// Supports write-only mode via the `X-Backflow-Write-Only: true` header,
+/// which disables feedback broadcasting to save bandwidth for input-only clients.
 pub async fn bidirectional_ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<WebSocketState>,
+    headers: HeaderMap,
 ) -> Response {
-    info!("New WebSocket connection from {}", addr);
-    ws.on_upgrade(move |socket| handle_socket(socket, addr, state))
+    // Check if client wants write-only mode (no feedback)
+    let is_write_only = headers
+        .get("X-Backflow-Write-Only")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if is_write_only {
+        info!(
+            "New write-only WebSocket connection from {} (no feedback)",
+            addr
+        );
+    } else {
+        info!("New bidirectional WebSocket connection from {}", addr);
+    }
+
+    ws.on_upgrade(move |socket| handle_socket(socket, addr, state, is_write_only))
 }
 /// Handles a single WebSocket message for a client. Returns true if the connection should break/close.
 #[tracing::instrument(skip_all, fields(msg))]
@@ -834,7 +850,7 @@ async fn handle_websocket_message(
             debug!("Received message from {}: {}", addr, text);
 
             // Try to parse as InputEventPacket first
-            if let Ok(packet) = serde_json::from_str::<InputEventPacket>(&text) {
+            if let Ok(mut packet) = serde_json::from_str::<InputEventPacket>(&text) {
                 debug!(
                     "Parsed input packet from {}: device_id={}, events={}",
                     addr,
@@ -842,21 +858,36 @@ async fn handle_websocket_message(
                     packet.events.len()
                 );
 
-                // Check timestamp ordering to prevent out-of-order packets
-                if state.should_process_packet(&packet).await {
-                    if let Err(e) = input_stream.send(packet).await {
-                        error!("Failed to send input event to stream: {}", e);
-                    } else {
-                        debug!(
-                            "Successfully sent input event packet from {} to main input stream",
-                            addr
-                        );
+                // Create a compound device ID that includes client address for atomicity tracking
+                // This prevents out-of-order packet issues between different network clients
+                // while preserving the original device_id for the application
+                let original_device_id = packet.device_id.clone();
+                let atomicity_device_id = format!("{}@{}", packet.device_id, addr);
+                packet.device_id = atomicity_device_id;
+
+                // Process through atomic processor for batching and ordering
+                match state.atomic_processor.process_packet(packet).await {
+                    Ok(Some(mut atomic_packet)) => {
+                        // Restore the original device_id for the application
+                        atomic_packet.device_id = original_device_id;
+
+                        // Send the atomic batch to the input stream
+                        if let Err(e) = input_stream.send(atomic_packet).await {
+                            error!("Failed to send atomic input batch to stream: {}", e);
+                        } else {
+                            debug!(
+                                "Successfully sent atomic input batch from {} to main input stream",
+                                addr
+                            );
+                        }
                     }
-                } else {
-                    debug!(
-                        "Discarded out-of-order input packet from {} for device '{}'",
-                        addr, packet.device_id
-                    );
+                    Ok(None) => {
+                        // Packet was buffered, will be sent later as part of an atomic batch
+                        trace!("Input packet from {} buffered for atomic batching", addr);
+                    }
+                    Err(e) => {
+                        warn!("Failed to process input packet from {}: {}", addr, e);
+                    }
                 }
             }
             // If not an input packet, try to parse as FeedbackEventPacket for broadcasting
@@ -954,23 +985,40 @@ async fn handle_feedback_packet_to_client(
 }
 
 /// Handles a single WebSocket connection for bidirectional communication.
+/// If `is_write_only` is true, the client will not receive feedback events.
 #[tracing::instrument(skip_all)]
-async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: WebSocketState) {
+async fn handle_socket(
+    socket: WebSocket,
+    addr: SocketAddr,
+    state: WebSocketState,
+    is_write_only: bool,
+) {
     let (sender, mut receiver) = socket.split();
 
-    // Create a channel for this specific client to receive feedback
-    let (feedback_tx, feedback_rx) = tokio::sync::mpsc::unbounded_channel::<FeedbackEventPacket>();
+    // Create a channel for this specific client to receive feedback (only if not write-only)
+    let feedback_tx = if !is_write_only {
+        let (feedback_tx, feedback_rx) =
+            tokio::sync::mpsc::unbounded_channel::<FeedbackEventPacket>();
 
-    // Add this client to the list of connected clients for feedback broadcasting
-    {
-        let mut clients = state.connected_clients.write().await;
-        clients.push(feedback_tx);
-        info!(
-            "Client {} added to feedback broadcast list. Total clients: {}",
-            addr,
-            clients.len()
+        // Add this client to the list of connected clients for feedback broadcasting
+        {
+            let mut clients = state.connected_clients.write().await;
+            clients.push(feedback_tx.clone());
+            info!(
+                "Client {} added to feedback broadcast list. Total clients: {}",
+                addr,
+                clients.len()
+            );
+        }
+
+        Some((feedback_tx, feedback_rx))
+    } else {
+        debug!(
+            "Client {} is write-only, skipping feedback channel setup",
+            addr
         );
-    }
+        None
+    };
 
     // Clone state for the tasks
     let input_stream = state.input_stream.clone();
@@ -1008,10 +1056,16 @@ async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: WebSocketStat
         tokio::spawn(handle_web_socket_messages)
     };
 
-    // Task to handle outgoing messages (feedback events to client)
-    let output_task = {
+    // Task to handle outgoing messages (feedback events to client) - only if not write-only
+    let output_task = if let Some((_, feedback_rx)) = feedback_tx {
         let sender = sender.clone();
-        tokio::spawn(handle_feedback_to_client(feedback_rx, sender, addr))
+        Some(tokio::spawn(handle_feedback_to_client(
+            feedback_rx,
+            sender,
+            addr,
+        )))
+    } else {
+        None
     };
 
     /// Handles sending feedback events to a single WebSocket client.
@@ -1028,12 +1082,21 @@ async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: WebSocketStat
     }
 
     // Wait for either task to complete (connection closed or error)
-    tokio::select! {
-        _ = input_task => {
-            debug!("Input task completed for {}", addr);
+    match output_task {
+        Some(output_task) => {
+            tokio::select! {
+                _ = input_task => {
+                    debug!("Input task completed for {}", addr);
+                }
+                _ = output_task => {
+                    debug!("Output task completed for {}", addr);
+                }
+            }
         }
-        _ = output_task => {
-            debug!("Output task completed for {}", addr);
+        None => {
+            // Write-only mode - only wait for input task
+            let _ = input_task.await;
+            debug!("Input-only task completed for {}", addr);
         }
     }
 

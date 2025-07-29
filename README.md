@@ -71,6 +71,73 @@ The web UI can be accessed at `http://localhost:8000/`, which provides a basic [
 
 Note that this layout only provides 16 slider zones, unlike a standard CHUNITHM controller which splits this vertically into 32 zones. The game however only uses 16 horizontal zones, so this is sufficient for testing purposes.
 
+### WebSocket API
+
+The WebSocket endpoint accepts JSON-formatted input events and optionally sends back feedback events. You can connect to `ws://localhost:8000/ws` to send input events.
+
+#### Write-Only Mode
+
+For applications that only need to send input events without receiving feedback (to save bandwidth), you can use write-only mode by adding the `X-Backflow-Write-Only: true` header when establishing the WebSocket connection:
+
+```javascript
+// JavaScript example
+const ws = new WebSocket('ws://localhost:8000/ws', [], {
+    headers: {
+        'X-Backflow-Write-Only': 'true'
+    }
+});
+
+// Python websockets example
+import websockets
+
+async def connect():
+    extra_headers = {'X-Backflow-Write-Only': 'true'}
+    async with websockets.connect('ws://localhost:8000/ws', extra_headers=extra_headers) as websocket:
+        # Send input events without receiving feedback
+        await websocket.send('{"device_id":"my_device","timestamp":1234567890,"events":[...]}')
+```
+
+#### Input Event Format
+
+Send input events as JSON objects:
+
+```json
+{
+    "device_id": "my_controller",
+    "timestamp": 1234567890123,
+    "events": [
+        {
+            "Keyboard": {
+                "KeyPress": {
+                    "key": "CHUNIIO_SLIDER_1"
+                }
+            }
+        }
+    ]
+}
+```
+
+#### Feedback Events (if not in write-only mode)
+
+Receive feedback events for LEDs, haptics, etc.:
+
+```json
+{
+    "device_id": "my_controller", 
+    "timestamp": 1234567890123,
+    "events": [
+        {
+            "RgbLed": {
+                "SetColor": {
+                    "led": 0,
+                    "color": [255, 0, 0]
+                }
+            }
+        }
+    ]
+}
+```
+
 ### Configuration
 
 Backflow supports per-device filtering and key remapping through a TOML configuration file. Create a `backflow.toml` file in your working directory:
@@ -106,6 +173,7 @@ device_type = "keyboard"
 ```
 
 This allows you to:
+
 - Map custom keycodes (like `SLIDER_1`, `GAME_1`) to standard evdev codes (`KEY_A`, `KEY_SPACE`)
 - Route different devices to different output backends
 - Configure device-specific transformations

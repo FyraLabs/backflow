@@ -85,6 +85,7 @@
 
 use crate::feedback::FeedbackEventStream;
 use crate::feedback::generators::chuni_jvs::{ChuniLedDataPacket, LedBoardData, Rgb};
+use crate::input::atomic::{AtomicInputProcessor, BatchingConfig};
 use crate::input::brokenithm::{BoardInputState, get_brokenithm_state};
 use crate::input::{
     InputEvent, InputEventPacket, InputEventReceiver, InputEventStream, KeyboardEvent,
@@ -162,7 +163,8 @@ pub struct ChuniioProxyServer {
     input_receiver: InputEventReceiver,
     feedback_stream: FeedbackEventStream,
     led_packet_tx: mpsc::UnboundedSender<ChuniLedDataPacket>,
-    last_coin_pulse: bool, // Track coin pulse state for edge detection
+    atomic_processor: Arc<AtomicInputProcessor>, // For cross-device input atomicity
+    last_coin_pulse: bool,                       // Track coin pulse state for edge detection
     board_state: Option<BoardInputState>, // Track last applied Brokenithm state for change detection
 }
 
@@ -193,6 +195,7 @@ impl ChuniioProxyServer {
             input_receiver: input_stream.subscribe(),
             feedback_stream,
             led_packet_tx,
+            atomic_processor: Arc::new(AtomicInputProcessor::new(BatchingConfig::default())),
             last_coin_pulse: false,
             board_state: None,
         }
@@ -228,6 +231,9 @@ impl OutputBackend for ChuniioProxyServer {
                 tracing::error!("Chuniio proxy server error: {}", e);
             }
         });
+
+        // Atomic processing is now handled at the input source level (e.g., WebSocket)
+        // No need for additional atomic processing here to avoid conflicts
 
         // Start feedback handler task
         let feedback_handle = tokio::spawn(async move {
@@ -294,11 +300,15 @@ impl OutputBackend for ChuniioProxyServer {
                     tracing::trace!("Received input packet from application");
                     match packet {
                         Some(packet) => {
-                            if let Err(e) = self.process_input_packet(packet, &input_tx).await {
+                            // Skip atomic processing here since input sources (like WebSocket)
+                            // already handle their own atomicity and batching.
+                            // Direct processing prevents double-atomicity conflicts.
+                            if let Err(e) = self.process_atomic_input_packet(packet, &input_tx).await {
                                 tracing::error!("Failed to process input packet: {}", e);
                             }
                         }
                         None => {
+                            // Input stream closed, stopping chuniio proxy backend
                             tracing::info!("Input stream closed, stopping chuniio proxy backend");
                             break;
                         }
@@ -345,16 +355,17 @@ impl OutputBackend for ChuniioProxyServer {
 }
 
 impl ChuniioProxyServer {
-    /// Process input packets from the application and convert to chuniio events
+    /// Process atomic input packets from the atomic processor and convert to chuniio events
     #[tracing::instrument(level = "debug", skip_all, fields(events = packet.events.len()), err)]
-    async fn process_input_packet(
+    async fn process_atomic_input_packet(
         &mut self,
         packet: InputEventPacket,
         _input_tx: &mpsc::UnboundedSender<ChuniInputEvent>,
     ) -> eyre::Result<()> {
         trace!(
-            "Processing batch packet with {} events",
-            packet.events.len()
+            "Processing atomic batch packet with {} events from device '{}'",
+            packet.events.len(),
+            packet.device_id
         );
 
         // Extract current state and apply all changes atomically
