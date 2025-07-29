@@ -5,7 +5,7 @@ use zbus::Connection;
 pub async fn system_bus() -> Result<Connection, Box<dyn Error>> {
     Connection::system()
         .await
-        .map_err(|e| format!("Failed to connect to system bus: {}", e).into())
+        .map_err(|e| format!("Failed to connect to system bus: {e}").into())
 }
 
 pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -61,15 +61,14 @@ mod tests {
                     }
                     Err(e) => {
                         println!(
-                            "Could not create target device: {}, but service is available",
-                            e
+                            "Could not create target device: {e}, but service is available"
                         );
                         // This is ok - service might be running but not fully functional
                     }
                 }
             }
             Err(e) => {
-                println!("InputPlumber service not available: {}", e);
+                println!("InputPlumber service not available: {e}");
                 // This is expected in CI/test environments where the service isn't running
                 println!("Test passed - library compiles and can attempt connections");
             }

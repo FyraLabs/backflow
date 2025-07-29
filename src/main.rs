@@ -24,7 +24,7 @@ pub fn build_logger() -> Result<()> {
             .add_directive("tokio_tungstenite=warn".parse().unwrap())
             .add_directive("async_io=warn".parse().unwrap())
             .add_directive(
-                format!("{}=warn", PACKET_PROCESSING_TARGET)
+                format!("{PACKET_PROCESSING_TARGET}=warn")
                     .parse()
                     .unwrap(),
             )

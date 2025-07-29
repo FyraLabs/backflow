@@ -31,7 +31,7 @@ impl AppConfig {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config: AppConfig = Self::from_toml_str(&contents)
-            .map_err(|e| format!("Failed to parse config file: {}", e))?;
+            .map_err(|e| format!("Failed to parse config file: {e}"))?;
         Ok(config)
     }
 
@@ -99,7 +99,7 @@ fn default_unix_socket_path() -> PathBuf {
         return PathBuf::from(env_path);
     }
     let uid = nix::unistd::Uid::effective().as_raw();
-    PathBuf::from(format!("/run/user/{}/backflow", uid))
+    PathBuf::from(format!("/run/user/{uid}/backflow"))
 }
 
 // set web.enabled = false in [input.web] to explicitly disable the web backend
@@ -209,7 +209,7 @@ mod keyexpr_remap_serde {
         S: Serializer,
     {
         let as_str_map: HashMap<&String, String> =
-            map.iter().map(|(k, v)| (k, format!("{}", v))).collect();
+            map.iter().map(|(k, v)| (k, format!("{v}"))).collect();
         as_str_map.serialize(serializer)
     }
 
@@ -264,8 +264,8 @@ fn default_chuniio_proxy_socket_path() -> PathBuf {
     }
     // Try to use user runtime directory, fallback to /tmp
     let uid = nix::unistd::Uid::effective().as_raw();
-    let runtime_dir = format!("/run/user/{}", uid);
-    let runtime_path = format!("{}/backflow_chuniio", runtime_dir);
+    let runtime_dir = format!("/run/user/{uid}");
+    let runtime_path = format!("{runtime_dir}/backflow_chuniio");
     if std::path::Path::new(&runtime_dir).exists() {
         PathBuf::from(runtime_path)
     } else {
@@ -719,11 +719,11 @@ mod tests {
     fn test_keyexpr_to_string() {
         // Test single key
         let single = KeyExpr::Single("KEY_A".to_string());
-        assert_eq!(format!("{}", single), "KEY_A");
+        assert_eq!(format!("{single}"), "KEY_A");
 
         // Test combo
         let combo = KeyExpr::Combo(vec!["KEY_A".to_string(), "KEY_B".to_string()]);
-        assert_eq!(format!("{}", combo), "KEY_A+KEY_B");
+        assert_eq!(format!("{combo}"), "KEY_A+KEY_B");
 
         // Test sequence
         let sequence = KeyExpr::Sequence(vec![
@@ -731,6 +731,6 @@ mod tests {
             "KEY_B".to_string(),
             "KEY_C".to_string(),
         ]);
-        assert_eq!(format!("{}", sequence), "KEY_A,KEY_B,KEY_C");
+        assert_eq!(format!("{sequence}"), "KEY_A,KEY_B,KEY_C");
     }
 }

@@ -40,6 +40,11 @@ impl BoardInputState {
     }
 }
 
+type ClientCleanup = (
+    Arc<RwLock<Vec<Arc<tokio::sync::Mutex<tokio::net::TcpStream>>>>>,
+    Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+);
+
 /// Global shared state for Brokenithm input
 static BROKENITHM_SHARED_STATE: OnceLock<RwLock<Option<BoardInputState>>> = OnceLock::new();
 
@@ -330,7 +335,7 @@ impl BrokenithmTcpBackend {
         );
 
         // Connect to the local forwarded port
-        let connect_addr = format!("127.0.0.1:{}", local_port);
+        let connect_addr = format!("127.0.0.1:{local_port}");
         loop {
             match TcpStream::connect(&connect_addr).await {
                 Ok(socket) => {
@@ -355,10 +360,7 @@ impl BrokenithmTcpBackend {
 
     async fn handle_connection(
         socket: Arc<tokio::sync::Mutex<TcpStream>>,
-        client_cleanup: Option<(
-            Arc<RwLock<Vec<Arc<tokio::sync::Mutex<tokio::net::TcpStream>>>>>,
-            Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
-        )>,
+        client_cleanup: Option<ClientCleanup>,
         addr: Option<SocketAddr>,
         feedback_stream: FeedbackEventStream,
     ) {
@@ -373,7 +375,7 @@ impl BrokenithmTcpBackend {
                         let led_msg = led_feedback_to_cled(&feedback);
                         let mut socket_guard = socket_for_feedback.lock().await;
                         if let Err(e) = socket_guard.write_all(&led_msg).await {
-                            tracing::warn!("Failed to send feedback: {}", e);
+                            tracing::warn!("Failed to send feedback: {e}");
                             break;
                         }
                     }
@@ -493,11 +495,6 @@ impl BrokenithmTcpBackend {
         }
     }
 }
-
-// Legacy type aliases for backward compatibility
-pub type BrokenithmTcpServer = BrokenithmTcpBackend;
-pub type BrokenithmTcpClient = BrokenithmTcpBackend;
-pub type BrokenithmIdeviceClient = BrokenithmTcpBackend;
 
 #[derive(Debug)]
 pub enum BrokenithmMessage {
@@ -640,7 +637,7 @@ impl BrokenithmInputStateTracker {
 
         // Air zones (CHUNIIO_IR_N as KeyPress/KeyRelease)
         for (i, (&prev, &curr)) in self.prev_air.iter().zip(air.iter()).enumerate() {
-            let key = format!("CHUNIIO_IR_{}", i);
+            let key = format!("CHUNIIO_IR_{i}");
             if prev == 0 && curr > 0 {
                 events.push(InputEvent::Keyboard(KeyboardEvent::KeyPress {
                     key: key.clone(),
@@ -654,7 +651,7 @@ impl BrokenithmInputStateTracker {
 
         // Slider - direct comparison without debouncing (like C implementation)
         for (i, (&prev, &curr)) in self.prev_slider.iter().zip(slider.iter()).enumerate() {
-            let key = format!("CHUNIIO_SLIDER_{}", i);
+            let key = format!("CHUNIIO_SLIDER_{i}");
             if prev < 128 && curr >= 128 {
                 events.push(InputEvent::Keyboard(KeyboardEvent::KeyPress {
                     key: key.clone(),

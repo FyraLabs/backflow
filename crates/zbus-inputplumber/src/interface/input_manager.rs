@@ -97,7 +97,7 @@ impl From<&str> for TargetDeviceType {
             .iter()
             .find(|(_, s)| *s == value)
             .map(|(device_type, _)| *device_type)
-            .unwrap_or_else(|| panic!("Unknown target device type: {}", value))
+            .unwrap_or_else(|| panic!("Unknown target device type: {value}"))
     }
 }
 

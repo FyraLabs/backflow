@@ -166,10 +166,7 @@ impl InputEventStream {
             Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 // If lagged, try to get the next message
-                match rx.recv().await {
-                    Ok(packet) => Some(packet),
-                    Err(_) => None,
-                }
+                (rx.recv().await).ok()
             }
         }
     }
@@ -183,10 +180,7 @@ impl InputEventReceiver {
             Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                 // If lagged, try to get the next message
-                match self.rx.recv().await {
-                    Ok(packet) => Some(packet),
-                    Err(_) => None,
-                }
+                (self.rx.recv().await).ok()
             }
         }
     }

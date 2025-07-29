@@ -312,7 +312,7 @@ impl KeyExpr {
 impl fmt::Display for KeyExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KeyExpr::Single(k) => write!(f, "{}", k),
+            KeyExpr::Single(k) => write!(f, "{k}"),
             KeyExpr::Combo(keys) => write!(f, "{}", keys.join("+")),
             KeyExpr::Sequence(keys) => write!(f, "{}", keys.join(",")),
         }
@@ -781,11 +781,11 @@ mod tests {
     fn test_keyexpr_to_string() {
         // Test single key
         let single = KeyExpr::Single("KEY_A".to_string());
-        assert_eq!(format!("{}", single), "KEY_A");
+        assert_eq!(format!("{single}"), "KEY_A");
 
         // Test combo
         let combo = KeyExpr::Combo(vec!["KEY_A".to_string(), "KEY_B".to_string()]);
-        assert_eq!(format!("{}", combo), "KEY_A+KEY_B");
+        assert_eq!(format!("{combo}"), "KEY_A+KEY_B");
 
         // Test sequence
         let sequence = KeyExpr::Sequence(vec![
@@ -793,6 +793,6 @@ mod tests {
             "KEY_B".to_string(),
             "KEY_C".to_string(),
         ]);
-        assert_eq!(format!("{}", sequence), "KEY_A,KEY_B,KEY_C");
+        assert_eq!(format!("{sequence}"), "KEY_A,KEY_B,KEY_C");
     }
 }

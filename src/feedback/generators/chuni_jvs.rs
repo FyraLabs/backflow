@@ -474,6 +474,132 @@ pub async fn run_chuniio_service(
     let mut service = ChuniRgbService::new(config, feedback_stream, packet_receiver);
     service.run().await
 }
+/// CHUNITHM RGB feedback service that listens on a Unix domain socket
+/// and processes JVS-like LED data packets
+pub struct ChuniRgbService {
+    config: ChuniIoRgbConfig,
+    feedback_stream: crate::feedback::FeedbackEventStream,
+    packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
+}
+
+impl ChuniRgbService {
+    /// Create a new CHUNITHM RGB feedback service
+    pub fn new(
+        config: ChuniIoRgbConfig,
+        feedback_stream: crate::feedback::FeedbackEventStream,
+        packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
+    ) -> Self {
+        Self {
+            config,
+            feedback_stream,
+            packet_receiver,
+        }
+    }
+
+    /// Start the RGB feedback service
+    pub async fn run(&mut self) -> eyre::Result<()> {
+        info!("Starting CHUNITHM RGB feedback service");
+
+        // Use try_recv in a loop for lower latency processing
+        loop {
+            tokio::select! {
+                // Process packets with high priority
+                packet = self.packet_receiver.recv() => {
+                    match packet {
+                        Some(packet) => {
+                            if let Err(e) = self.process_packet(packet).await {
+                                warn!("Failed to process LED packet: {}", e);
+                            }
+                        }
+                        None => {
+                            info!("LED packet channel closed");
+                            break;
+                        }
+                    }
+                }
+                // Small yield to prevent busy waiting
+                _ = tokio::time::sleep(tokio::time::Duration::from_micros(100)) => {
+                    // Process any remaining packets in the queue quickly
+                    while let Ok(packet) = self.packet_receiver.try_recv() {
+                        if let Err(e) = self.process_packet(packet).await {
+                            warn!("Failed to process LED packet: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("CHUNITHM RGB feedback service stopped");
+        Ok(())
+    }
+
+    /// Process a single LED data packet
+    async fn process_packet(&self, packet: ChuniLedDataPacket) -> eyre::Result<()> {
+        let board_id = packet.board;
+        let device_id = format!("chuni_jvs_board_{board_id}");
+        // Skip timestamp calculation for performance
+        let timestamp = 0u64;
+
+        let events = match packet.data {
+            LedBoardData::Slider(leds) => self.process_slider_leds(leds),
+            LedBoardData::BillboardLeft(leds) => self.process_billboard_leds(leds.to_vec(), 0),
+            LedBoardData::BillboardRight(leds) => self.process_billboard_leds(leds.to_vec(), 1),
+        };
+
+        if !events.is_empty() {
+            let feedback_packet = FeedbackEventPacket {
+                device_id,
+                timestamp,
+                events,
+            };
+
+            // Send feedback packet - use try_send for non-blocking transmission
+            if let Err(e) = self.feedback_stream.try_send(feedback_packet) {
+                warn!("Failed to send feedback packet: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process slider LEDs, applying clamping if configured
+    fn process_slider_leds(&self, leds: [Rgb; 31]) -> Vec<FeedbackEvent> {
+        let zones = self.config.slider_clamp_lights as usize;
+        let clamped_leds = if zones > 0 && zones < 31 {
+            ChuniLedDataPacket::clamp_slider_to_zones(leds, zones)
+        } else {
+            leds.to_vec()
+        };
+
+        clamped_leds
+            .into_iter()
+            .enumerate()
+            .map(|(i, rgb)| {
+                FeedbackEvent::Led(LedEvent::Set {
+                    led_id: (self.config.slider_id_offset as u8) + i as u8,
+                    on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
+                    brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
+                    rgb: Some((rgb.r, rgb.g, rgb.b)),
+                })
+            })
+            .collect()
+    }
+
+    /// Process billboard LEDs
+    fn process_billboard_leds(&self, leds: Vec<Rgb>, _board_offset: u8) -> Vec<FeedbackEvent> {
+        leds.into_iter()
+            .enumerate()
+            .map(|(i, rgb)| {
+                FeedbackEvent::Led(LedEvent::Set {
+                    led_id: i as u8, // Adjust ID based on board if needed
+                    on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
+                    brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
+                    rgb: Some((rgb.r, rgb.g, rgb.b)),
+                })
+            })
+            .collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -557,7 +683,7 @@ mod tests {
 
         let result = ChuniLedDataPacket::try_parse_packet(&data);
         if let Err(ref e) = result {
-            eprintln!("Parse error: {:?}", e);
+            eprintln!("Parse error: {e:?}");
             eprintln!("Data length: {}, Expected: {}", data.len(), 93 + 2);
         }
         assert!(result.is_ok());
@@ -570,131 +696,5 @@ mod tests {
         } else {
             panic!("Expected slider data");
         }
-    }
-}
-/// CHUNITHM RGB feedback service that listens on a Unix domain socket
-/// and processes JVS-like LED data packets
-pub struct ChuniRgbService {
-    config: ChuniIoRgbConfig,
-    feedback_stream: crate::feedback::FeedbackEventStream,
-    packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
-}
-
-impl ChuniRgbService {
-    /// Create a new CHUNITHM RGB feedback service
-    pub fn new(
-        config: ChuniIoRgbConfig,
-        feedback_stream: crate::feedback::FeedbackEventStream,
-        packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
-    ) -> Self {
-        Self {
-            config,
-            feedback_stream,
-            packet_receiver,
-        }
-    }
-
-    /// Start the RGB feedback service
-    pub async fn run(&mut self) -> eyre::Result<()> {
-        info!("Starting CHUNITHM RGB feedback service");
-
-        // Use try_recv in a loop for lower latency processing
-        loop {
-            tokio::select! {
-                // Process packets with high priority
-                packet = self.packet_receiver.recv() => {
-                    match packet {
-                        Some(packet) => {
-                            if let Err(e) = self.process_packet(packet).await {
-                                warn!("Failed to process LED packet: {}", e);
-                            }
-                        }
-                        None => {
-                            info!("LED packet channel closed");
-                            break;
-                        }
-                    }
-                }
-                // Small yield to prevent busy waiting
-                _ = tokio::time::sleep(tokio::time::Duration::from_micros(100)) => {
-                    // Process any remaining packets in the queue quickly
-                    while let Ok(packet) = self.packet_receiver.try_recv() {
-                        if let Err(e) = self.process_packet(packet).await {
-                            warn!("Failed to process LED packet: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-
-        info!("CHUNITHM RGB feedback service stopped");
-        Ok(())
-    }
-
-    /// Process a single LED data packet
-    async fn process_packet(&self, packet: ChuniLedDataPacket) -> eyre::Result<()> {
-        let board_id = packet.board;
-        let device_id = format!("chuni_jvs_board_{}", board_id);
-        // Skip timestamp calculation for performance
-        let timestamp = 0u64;
-
-        let events = match packet.data {
-            LedBoardData::Slider(leds) => self.process_slider_leds(leds),
-            LedBoardData::BillboardLeft(leds) => self.process_billboard_leds(leds.to_vec(), 0),
-            LedBoardData::BillboardRight(leds) => self.process_billboard_leds(leds.to_vec(), 1),
-        };
-
-        if !events.is_empty() {
-            let feedback_packet = FeedbackEventPacket {
-                device_id,
-                timestamp,
-                events,
-            };
-
-            // Send feedback packet - use try_send for non-blocking transmission
-            if let Err(e) = self.feedback_stream.try_send(feedback_packet) {
-                warn!("Failed to send feedback packet: {}", e);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Process slider LEDs, applying clamping if configured
-    fn process_slider_leds(&self, leds: [Rgb; 31]) -> Vec<FeedbackEvent> {
-        let zones = self.config.slider_clamp_lights as usize;
-        let clamped_leds = if zones > 0 && zones < 31 {
-            ChuniLedDataPacket::clamp_slider_to_zones(leds, zones)
-        } else {
-            leds.to_vec()
-        };
-
-        clamped_leds
-            .into_iter()
-            .enumerate()
-            .map(|(i, rgb)| {
-                FeedbackEvent::Led(LedEvent::Set {
-                    led_id: (self.config.slider_id_offset as u8) + i as u8,
-                    on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
-                    brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
-                    rgb: Some((rgb.r, rgb.g, rgb.b)),
-                })
-            })
-            .collect()
-    }
-
-    /// Process billboard LEDs
-    fn process_billboard_leds(&self, leds: Vec<Rgb>, _board_offset: u8) -> Vec<FeedbackEvent> {
-        leds.into_iter()
-            .enumerate()
-            .map(|(i, rgb)| {
-                FeedbackEvent::Led(LedEvent::Set {
-                    led_id: i as u8, // Adjust ID based on board if needed
-                    on: rgb.r > 0 || rgb.g > 0 || rgb.b > 0,
-                    brightness: Some(rgb.r.max(rgb.g).max(rgb.b)),
-                    rgb: Some((rgb.r, rgb.g, rgb.b)),
-                })
-            })
-            .collect()
     }
 }

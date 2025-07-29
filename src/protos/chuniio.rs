@@ -95,7 +95,7 @@ impl TryFrom<u8> for MessageType {
             0x0D => Ok(MessageType::JvsFullStateReadResponse),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Unknown message type: {:#04x}", value),
+                format!("Unknown message type: {value:#04x}"),
             )),
         }
     }

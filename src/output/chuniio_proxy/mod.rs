@@ -179,8 +179,8 @@ impl ChuniioProxyServer {
         let socket_path = socket_path.unwrap_or_else(|| {
             // Try to use user runtime directory, fallback to /tmp
             let uid = nix::unistd::Uid::effective().as_raw();
-            let runtime_dir = format!("/run/user/{}", uid);
-            let runtime_path = format!("{}/backflow_chuniio.sock", runtime_dir);
+            let runtime_dir = format!("/run/user/{uid}");
+            let runtime_path = format!("{runtime_dir}/backflow_chuniio.sock");
             if std::path::Path::new(&runtime_dir).exists() {
                 PathBuf::from(runtime_path)
             } else {
