@@ -517,8 +517,18 @@ impl Backend {
             tracing::debug!("No ChuniIO feedback configured, starting LED packet drain service");
             self.service_manager.spawn(async move {
                 let mut led_packet_rx = led_packet_rx;
-                while let Some(_packet) = led_packet_rx.recv().await {
-                    // Discard packets to prevent channel closure
+                loop {
+                    match led_packet_rx.recv().await {
+                        Some(_packet) => {
+                            // Discard packets to prevent channel closure
+                        }
+                        None => {
+                            // Channel closed - this is expected when no chuniio_proxy is configured
+                            // Keep the service running as a no-op to avoid unexpected completion
+                            tracing::debug!("LED packet channel closed, continuing as no-op service");
+                            std::future::pending::<()>().await;
+                        }
+                    }
                 }
             });
         }
