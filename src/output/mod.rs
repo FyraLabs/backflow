@@ -200,15 +200,9 @@ mod tests {
         // Verify that standard events went to uinput backend
         let uinput_key_a_count = final_counts.get("uinput_KEY_A").unwrap_or(&0);
 
-        println!(
-            "CHUNIIO_SLIDER_1 events processed by chuniio backend: {chuniio_slider_count}"
-        );
-        println!(
-            "CHUNIIO_TEST events processed by chuniio backend: {chuniio_test_count}"
-        );
-        println!(
-            "KEY_A events processed by uinput backend: {uinput_key_a_count}"
-        );
+        println!("CHUNIIO_SLIDER_1 events processed by chuniio backend: {chuniio_slider_count}");
+        println!("CHUNIIO_TEST events processed by chuniio backend: {chuniio_test_count}");
+        println!("KEY_A events processed by uinput backend: {uinput_key_a_count}");
 
         // With the broadcast fix: Each backend should receive all events and filter appropriately
         // CHUNIIO events should now reach the chuniio backend, while standard events go to uinput

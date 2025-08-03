@@ -23,11 +23,7 @@ pub fn build_logger() -> Result<()> {
             .add_directive("tungstenite=warn".parse().unwrap())
             .add_directive("tokio_tungstenite=warn".parse().unwrap())
             .add_directive("async_io=warn".parse().unwrap())
-            .add_directive(
-                format!("{PACKET_PROCESSING_TARGET}=warn")
-                    .parse()
-                    .unwrap(),
-            )
+            .add_directive(format!("{PACKET_PROCESSING_TARGET}=warn").parse().unwrap())
         // Keep our application logs at trace level
         // .add_directive("Backflow=trace".parse().unwrap())
     });

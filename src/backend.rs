@@ -525,7 +525,9 @@ impl Backend {
                         None => {
                             // Channel closed - this is expected when no chuniio_proxy is configured
                             // Keep the service running as a no-op to avoid unexpected completion
-                            tracing::debug!("LED packet channel closed, continuing as no-op service");
+                            tracing::debug!(
+                                "LED packet channel closed, continuing as no-op service"
+                            );
                             std::future::pending::<()>().await;
                         }
                     }

@@ -60,9 +60,7 @@ mod tests {
                         println!("Stopped target device: {:?}", target_device.path);
                     }
                     Err(e) => {
-                        println!(
-                            "Could not create target device: {e}, but service is available"
-                        );
+                        println!("Could not create target device: {e}, but service is available");
                         // This is ok - service might be running but not fully functional
                     }
                 }
