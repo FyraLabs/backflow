@@ -523,7 +523,7 @@ impl InternalChuniioProxyServer {
 
         // Create the socket listener
         let listener = UnixListener::bind(&self.socket_path)?;
-        info!("Chuniio proxy server listening on {:?}", self.socket_path);
+        info!("Chuniio proxy server bound on {:?}", self.socket_path);
 
         // Make socket accessible to everyone (for compatibility with Windows DLL)
         #[cfg(unix)]

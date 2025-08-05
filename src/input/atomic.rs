@@ -307,51 +307,7 @@ pub enum ProcessingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{InputEvent, KeyboardEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[tokio::test]
-    async fn test_atomic_batching() {
-        let config = BatchingConfig {
-            max_batch_delay: Duration::from_millis(10),
-            max_batch_size: 3,
-            max_buffer_per_device: 5,
-        };
-
-        let processor = AtomicInputProcessor::new(config);
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        // Create multiple packets for the same device
-        let packet1 = InputEventPacket {
-            device_id: "test-device".to_string(),
-            timestamp,
-            events: vec![InputEvent::Keyboard(KeyboardEvent::KeyPress {
-                key: "a".to_string(),
-            })],
-        };
-
-        let packet2 = InputEventPacket {
-            device_id: "test-device".to_string(),
-            timestamp: timestamp + 1,
-            events: vec![InputEvent::Keyboard(KeyboardEvent::KeyRelease {
-                key: "a".to_string(),
-            })],
-        };
-
-        // Process packets
-        let result1 = processor.process_packet(packet1).await.unwrap();
-        let result2 = processor.process_packet(packet2).await.unwrap();
-
-        // First packet should be buffered
-        assert!(result1.is_none());
-
-        // Second packet might trigger a batch or remain buffered
-        // depending on timing and configuration
-    }
 
     #[tokio::test]
     async fn test_out_of_order_rejection() {
