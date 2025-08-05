@@ -1,4 +1,4 @@
-# Plumbershim Configuration Example
+# Backflow Configuration Example
 
 [input.web]
 enabled = true

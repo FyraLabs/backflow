@@ -45,7 +45,7 @@ pub fn build_logger() -> Result<()> {
 async fn main() -> Result<()> {
     build_logger()?;
     tracing::debug!("Debug logging is enabled");
-    tracing::info!("Plumbershim version: {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Backflow version: {}", env!("CARGO_PKG_VERSION"));
     tracing::debug!("Logging configured to suppress zbus and tungstenite verbose output");
     tracing::debug!(
         "Override with RUST_LOG environment variable if needed (e.g., RUST_LOG=zbus=trace)"

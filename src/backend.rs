@@ -1,4 +1,4 @@
-//! Backend module for Plumbershim
+//! Backend module for Backflow
 //!
 //! This module handles taking in a configuration, parsing it, and setting up the backend services.
 
