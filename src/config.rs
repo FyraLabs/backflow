@@ -42,14 +42,46 @@ impl AppConfig {
         let config_paths = [std::path::PathBuf::from("backflow.toml")];
 
         for path in &config_paths {
-            if let Ok(config) = Self::from_file(path) {
+            if let Ok(mut config) = Self::from_file(path) {
                 tracing::info!("Loaded configuration from: {}", path.display());
+                config.validate_and_fix();
                 return config;
             }
         }
 
         tracing::info!("No configuration file found, using defaults");
-        Self::default()
+        let mut config = Self::default();
+        config.validate_and_fix();
+        config
+    }
+
+    /// Validate and fix configuration inconsistencies
+    pub fn validate_and_fix(&mut self) {
+        // Check if chuniio_proxy is enabled
+        let chuniio_proxy_enabled = self
+            .output
+            .chuniio_proxy
+            .as_ref()
+            .map(|config| config.enabled)
+            .unwrap_or(false);
+
+        if chuniio_proxy_enabled {
+            // If chuniio_proxy is enabled, we should not read from a socket for feedback
+            // Clear the socket_path if it's configured
+            if let Some(ref mut chuniio_feedback) = self.feedback.chuniio {
+                if chuniio_feedback.socket_path.is_some() {
+                    tracing::warn!(
+                        "ChuniIO feedback socket_path ({:?}) will be ignored because chuniio_proxy is enabled. Feedback will be fed from chuniio_proxy instead.",
+                        chuniio_feedback.socket_path
+                    );
+                    chuniio_feedback.socket_path = None;
+                }
+            } else {
+                // Auto-enable chuniio feedback with default settings when chuniio_proxy is enabled
+                tracing::info!("Auto-enabling ChuniIO feedback because chuniio_proxy is enabled");
+                self.feedback.chuniio = Some(ChuniIoRgbConfig::default());
+            }
+        }
     }
 }
 

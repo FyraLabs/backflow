@@ -417,44 +417,10 @@ impl Backend {
         &mut self,
         led_packet_rx: mpsc::UnboundedReceiver<ChuniLedDataPacket>, // switched to unbounded Receiver
     ) {
-        // Check if chuniio_proxy is enabled
-        let chuniio_proxy_enabled = self
-            .config
-            .output
-            .chuniio_proxy
-            .as_ref()
-            .map(|config| config.enabled)
-            .unwrap_or(false);
-
-        // Auto-enable chuniio feedback if chuniio_proxy is enabled but feedback.chuniio is not configured
-        let should_enable_chuniio_feedback =
-            chuniio_proxy_enabled || self.config.feedback.chuniio.is_some();
-
-        tracing::debug!(
-            should_enable_chuniio_feedback,
-            chuniio_proxy_enabled,
-            feedback_chuniio_is_some = self.config.feedback.chuniio.is_some()
-        );
-
-        if should_enable_chuniio_feedback {
-            // Use configured chuniio config or create default one
-            let mut chuniio_config = if let Some(config) = &self.config.feedback.chuniio {
-                config.clone()
-            } else {
-                // Create default config for chuniio_proxy-only feedback
-                crate::config::ChuniIoRgbConfig::default()
-            };
-
-            // If chuniio_proxy is enabled, forcibly disable the feedback socket_path and warn
-            if chuniio_proxy_enabled && chuniio_config.socket_path.is_some() {
-                tracing::warn!(
-                    "ChuniIO feedback socket_path ({:?}) is ignored because chuniio_proxy is enabled. Feedback will be fed from chuniio_proxy only.",
-                    chuniio_config.socket_path
-                );
-                chuniio_config.socket_path = None;
-            }
-
+        // Check if chuniio feedback is configured
+        if let Some(chuniio_config) = &self.config.feedback.chuniio {
             if let Some(socket_path) = &chuniio_config.socket_path {
+                // Case 1: Read from socket and parse to feedback flow
                 tracing::info!(
                     "Starting ChuniIO RGB feedback service with JVS reader on socket: {:?}",
                     socket_path
@@ -478,7 +444,7 @@ impl Backend {
                     }
                 });
 
-                // Start RGB service
+                // Start RGB service fed by JVS reader
                 self.service_manager.spawn(async move {
                     use crate::feedback::generators::chuni_jvs::run_chuniio_service;
                     if let Err(e) = run_chuniio_service(config, feedback_stream, jvs_led_rx).await {
@@ -486,16 +452,22 @@ impl Backend {
                     }
                 });
 
-                // Consume and discard LED packets from chuniio_proxy since we're using JVS reader
+                // Discard LED packets from chuniio_proxy since we're using JVS reader
                 self.service_manager.spawn(async move {
                     let mut led_packet_rx = led_packet_rx;
                     while let Some(_packet) = led_packet_rx.recv().await {
                         // Discard packets to prevent channel closure
                     }
+                    // Channel closed - keep the service alive as a no-op
+                    tracing::debug!(
+                        "LED packet channel closed for JVS-only mode, continuing as no-op service"
+                    );
+                    std::future::pending::<()>().await;
                 });
             } else {
+                // Case 2: Use chuniio_proxy to feed RGB feedback data (socket_path is None)
                 tracing::info!(
-                    "Starting unified ChuniIO RGB feedback service (fed by chuniio_proxy, no socket)"
+                    "Starting ChuniIO RGB feedback service (fed by chuniio_proxy, no socket)"
                 );
 
                 // Start the unified service that processes packets from chuniio_proxy
