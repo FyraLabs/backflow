@@ -467,14 +467,14 @@ impl ChuniioProxyServer {
                 if let Ok(beam) = beam_str.parse::<u8>() {
                     if beam < 6 {
                         if pressed {
-                            state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam clear)
+                            state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam blocked)
                         } else {
-                            state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam blocked)
+                            state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam clear)
                         }
                         trace!(
                             "Batch: IR beam {} {}",
                             beam,
-                            if pressed { "clear" } else { "blocked" }
+                            if pressed { "blocked" } else { "clear" }
                         );
                     }
                 }
