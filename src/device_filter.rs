@@ -1,20 +1,17 @@
 //! Device filtering and transformation module
 //!
 //! This module provides per-device filtering and key remapping functionality.
-//! It acts as an intermediate layer between input and output backends,
-//! allowing custom keycodes to be remapped to standard evdev codes
-//! and routing events to specific output backends based on device configuration.
+//! It focuses purely on transforming input events (key remapping, combos, sequences)
+//! while leaving routing decisions to the EventRouter in the backend.
 
 use crate::config::{AppConfig, DeviceConfig};
-use crate::input::{AnalogEvent, InputEvent, InputEventPacket, KeyboardEvent};
+use crate::input::{InputEvent, InputEventPacket, KeyboardEvent};
 use eyre::Result;
 use std::collections::HashMap;
 use std::fmt;
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
-// Let's add an expression engine for our keys :3
-
-/// Device filter that applies per-device transformations and routing
+/// Device filter that applies per-device transformations
 #[derive(Clone)]
 pub struct DeviceFilter {
     /// Device configurations mapped by device ID
@@ -30,6 +27,8 @@ impl DeviceFilter {
     }
 
     /// Transform an input event packet according to device-specific rules
+    /// This focuses purely on transforming events (remapping keys, expanding combos)
+    /// without making routing decisions
     pub fn transform_packet(&self, mut packet: InputEventPacket) -> Result<InputEventPacket> {
         // Get device configuration for this device ID
         let device_config = self.device_configs.get(&packet.device_id);
@@ -43,19 +42,33 @@ impl DeviceFilter {
             // Transform and filter events based on device configuration
             let mut filtered_events = Vec::new();
             for event in packet.events.into_iter() {
-                // New: expand events if remapped to KeyExpr::Combo/Sequence
+                // Expand events if remapped to KeyExpr::Combo/Sequence
                 let expanded = self.expand_event(event, config)?;
                 filtered_events.extend(expanded);
             }
             packet.events = filtered_events;
-        } else {
-            // debug!(
-            //     "No device config found for device '{}', using default transformation",
-            //     packet.device_id
-            // );
         }
 
         Ok(packet)
+    }
+
+    /// Get the configured backend for a device (used by EventRouter)
+    pub fn get_device_backend(&self, device_id: &str) -> Option<&str> {
+        self.device_configs
+            .get(device_id)
+            .map(|config| config.map_backend.as_str())
+    }
+
+    /// Get the configured device type for a device
+    pub fn get_device_type(&self, device_id: &str) -> Option<&str> {
+        self.device_configs
+            .get(device_id)
+            .map(|config| config.device_type.as_str())
+    }
+
+    /// Check if a device has any configuration
+    pub fn has_device_config(&self, device_id: &str) -> bool {
+        self.device_configs.contains_key(device_id)
     }
 
     /// Expand an input event according to remapping rules (support KeyExpr)
@@ -118,143 +131,10 @@ impl DeviceFilter {
                     Ok(vec![InputEvent::Keyboard(keyboard_event)])
                 }
             }
-            // Analog and other events: unchanged for now
+            // Analog and other events: pass through unchanged for now
             _ => Ok(vec![event]),
         }
     }
-
-    /// Transform and filter a single input event based on device configuration
-    /// Returns true if the event should be kept, false if it should be filtered out
-    fn transform_and_filter_event(
-        &self,
-        event: &mut InputEvent,
-        config: &DeviceConfig,
-    ) -> Result<bool> {
-        match event {
-            InputEvent::Keyboard(keyboard_event) => {
-                self.transform_and_filter_keyboard_event(keyboard_event, config)
-            }
-            InputEvent::Analog(analog_event) => {
-                self.transform_and_filter_analog_event(analog_event, config)
-            }
-            InputEvent::Pointer(_) => {
-                // Pointer events don't typically need key remapping
-                // but could be extended in the future for device-specific transformations
-                // For now, always allow pointer events through
-                Ok(true)
-            }
-            InputEvent::Joystick(_) => {
-                // Joystick events could be remapped to keyboard events
-                // or other transformations in the future
-                // For now, always allow joystick events through
-                Ok(true)
-            }
-        }
-    }
-
-    // /// Transform a single input event based on device configuration (legacy method for compatibility)
-    // fn transform_event(&self, event: &mut InputEvent, config: &DeviceConfig) -> Result<()> {
-    //     self.transform_and_filter_event(event, config)?;
-    //     Ok(())
-    // }
-
-    /// Transform keyboard events based on device remapping rules and whitelist settings
-    /// Returns true if the event should be kept, false if it should be filtered out
-    fn transform_and_filter_keyboard_event(
-        &self,
-        event: &mut KeyboardEvent,
-        config: &DeviceConfig,
-    ) -> Result<bool> {
-        let key = match event {
-            KeyboardEvent::KeyPress { key } => key,
-            KeyboardEvent::KeyRelease { key } => key,
-        };
-
-        // Check if this key needs to be remapped
-        if let Some(remapped_expr) = config.remap.get(key) {
-            // For the legacy single-event transform, only handle Single expressions
-            match remapped_expr {
-                KeyExpr::Single(remapped_key) => {
-                    trace!("Remapping key '{}' to '{}' for device", key, remapped_key);
-                    *key = remapped_key.clone();
-                    return Ok(true); // Always keep remapped keys
-                }
-                _ => {
-                    warn!(
-                        "Complex KeyExpr found in legacy transform method - use expand_event instead"
-                    );
-                    return Ok(true); // Keep the original key for now
-                }
-            }
-        }
-
-        // Handle whitelist mode
-        if config.remap_whitelist {
-            // In whitelist mode, only allow keys that are in the remap table
-            trace!("Filtering out key '{}' (not in whitelist) for device", key);
-            return Ok(false); // Filter out keys not in remap table
-        }
-
-        // In non-whitelist mode, check if it's a custom key without remapping
-        if !Self::is_standard_evdev_key(key) {
-            // If it's not a standard evdev key and no remapping is defined, warn
-            warn!(
-                "Custom key '{}' has no remapping defined for device. Event may be ignored by output backend.",
-                key
-            );
-        }
-
-        Ok(true) // Keep the event in non-whitelist mode
-    }
-
-    fn transform_and_filter_analog_event(
-        &self,
-        event: &mut AnalogEvent,
-        config: &DeviceConfig,
-    ) -> Result<bool> {
-        // Check if this key needs to be remapped
-        if let Some(remapped_expr) = config.remap.get(&event.keycode) {
-            // For the legacy single-event transform, only handle Single expressions
-            match remapped_expr {
-                KeyExpr::Single(remapped_key) => {
-                    trace!(
-                        "Remapping analog key '{}' to '{}' for device",
-                        event.keycode, remapped_key
-                    );
-                    event.keycode = remapped_key.clone();
-                    return Ok(true); // Always keep remapped keys
-                }
-                _ => {
-                    warn!(
-                        "Complex KeyExpr found in legacy transform method - use expand_event instead"
-                    );
-                    return Ok(true); // Keep the original key for now
-                }
-            }
-        }
-
-        // Handle whitelist mode
-        if config.remap_whitelist {
-            // In whitelist mode, only allow keys that are in the remap table
-            debug!(
-                "Filtering out analog key '{}' (not in whitelist) for device",
-                event.keycode
-            );
-            return Ok(false); // Filter out keys not in remap table
-        }
-
-        Ok(true) // Keep the event in non-whitelist mode
-    }
-
-    // /// Transform keyboard events based on device remapping rules (legacy method for compatibility)
-    // fn transform_keyboard_event(
-    //     &self,
-    //     event: &mut KeyboardEvent,
-    //     config: &DeviceConfig,
-    // ) -> Result<()> {
-    //     self.transform_and_filter_keyboard_event(event, config)?;
-    //     Ok(())
-    // }
 
     /// Check if a key string appears to be a standard evdev key code
     pub fn is_standard_evdev_key(key: &str) -> bool {
@@ -263,28 +143,6 @@ impl DeviceFilter {
             || key.starts_with("BTN_")
             || key.starts_with("ABS_")
             || key.starts_with("REL_")
-    }
-
-    /// Get the target backend for a specific device
-    #[cfg(test)]
-    pub fn get_device_backend(&self, device_id: &str) -> Option<&str> {
-        self.device_configs
-            .get(device_id)
-            .map(|config| config.map_backend.as_str())
-    }
-
-    /// Get the device type for a specific device
-    #[cfg(test)]
-    pub fn get_device_type(&self, device_id: &str) -> Option<&str> {
-        self.device_configs
-            .get(device_id)
-            .map(|config| config.device_type.as_str())
-    }
-
-    /// Check if a device has any configuration
-    #[cfg(test)]
-    pub fn has_device_config(&self, device_id: &str) -> bool {
-        self.device_configs.contains_key(device_id)
     }
 }
 
