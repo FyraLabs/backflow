@@ -95,10 +95,11 @@ use crate::protos::chuniio::{
     CHUNI_IO_OPBTN_SERVICE, CHUNI_IO_OPBTN_TEST, ChuniFeedbackEvent, ChuniInputEvent, ChuniMessage,
     ChuniProtocolState,
 };
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tracing::{error, info, trace, warn};
 
 /// Default socket path for chuniio proxy
@@ -268,7 +269,7 @@ impl OutputBackend for ChuniioProxyServer {
                     if let Some(brokenithm_state) = get_brokenithm_state().await {
                         // Only apply state if it has changed to avoid redundant updates
                         if brokenithm_state_changed(&brokenithm_state, &self.board_state) {
-                            let mut chuniio_state = self.protocol_state.write().await;
+                            let mut chuniio_state = self.protocol_state.write();
                             tracing::trace!(
                                 "Brokenithm state changed, applying to chuniio state: air={:?}, slider={:?}, test={}, service={}, coin_pulse={}",
                                 brokenithm_state.air,
@@ -300,6 +301,13 @@ impl OutputBackend for ChuniioProxyServer {
                     tracing::trace!("Received input packet from application");
                     match packet {
                         Some(packet) => {
+                            let span = tracing::span!(
+                                tracing::Level::TRACE,
+                                "receive_input_packet_send_to_atomic",
+                                device_id = %packet.device_id,
+                                event_count = packet.events.len()
+                            );
+                            let _enter = span.enter();
                             // Skip atomic processing here since input sources (like WebSocket)
                             // already handle their own atomicity and batching.
                             // Direct processing prevents double-atomicity conflicts.
@@ -328,7 +336,7 @@ impl OutputBackend for ChuniioProxyServer {
 
                             trace!("Processing chuniio event in proxy: {:?}", event);
                             // Update internal state - use blocking write to ensure all events are processed
-                            let mut state = self.protocol_state.write().await;
+                            let mut state = self.protocol_state.write();
                             state.process_input_event(event);
                             trace!("Updated proxy state - opbtn: {}, beams: {}, coins: {}\nslider: {:?}",
                                   state.jvs_state.opbtn, state.jvs_state.beams, state.coin_counter, state.slider_state.pressure);
@@ -356,7 +364,7 @@ impl OutputBackend for ChuniioProxyServer {
 
 impl ChuniioProxyServer {
     /// Process atomic input packets from the atomic processor and convert to chuniio events
-    #[tracing::instrument(level = "debug", skip_all, fields(events = packet.events.len()), err)]
+    #[tracing::instrument( skip_all, fields(events = packet.events.len()), err)]
     async fn process_atomic_input_packet(
         &mut self,
         packet: InputEventPacket,
@@ -369,17 +377,11 @@ impl ChuniioProxyServer {
         );
 
         // Extract current state and apply all changes atomically
-        let mut state = self.protocol_state.write().await;
+        let mut state = self.protocol_state.write();
 
         // Apply all events in the batch
         for event in &packet.events {
-            match event {
-                InputEvent::Keyboard(KeyboardEvent::KeyPress { .. })
-                | InputEvent::Keyboard(KeyboardEvent::KeyRelease { .. }) => {
-                    Self::handle_keyboard_event(&mut state, event);
-                }
-                _ => {}
-            }
+            Self::handle_keyboard_event(&mut state, event);
         }
 
         // collect active slider regions for debug
@@ -406,7 +408,8 @@ impl ChuniioProxyServer {
     }
 
     /// Handle a single keyboard event and update protocol state accordingly
-    #[inline]
+    #[inline(always)]
+    #[tracing::instrument(skip(state, event), fields(key = %format!("{:?}", event)))]
     fn handle_keyboard_event(state: &mut ChuniProtocolState, event: &InputEvent) {
         match event {
             InputEvent::Keyboard(KeyboardEvent::KeyPress { key })
@@ -608,7 +611,7 @@ impl InternalChuniioProxyServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let client_id = {
-                        let mut next_id = self.next_client_id.write().await;
+                        let mut next_id = self.next_client_id.write();
                         let id = *next_id;
                         *next_id += 1;
                         id
@@ -783,7 +786,7 @@ impl InternalChuniioProxyServer {
         match message {
             ChuniMessage::JvsPoll => {
                 // Return current JVS state - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::JvsPollResponse {
                         opbtn: state.jvs_state.opbtn,
                         beams: state.jvs_state.beams,
@@ -798,7 +801,7 @@ impl InternalChuniioProxyServer {
             }
             ChuniMessage::CoinCounterRead => {
                 // Return current coin count - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::CoinCounterReadResponse {
                         count: state.coin_counter,
                     }
@@ -809,7 +812,7 @@ impl InternalChuniioProxyServer {
             }
             ChuniMessage::SliderStateRead => {
                 // Return current slider state - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::SliderStateReadResponse {
                         pressure: state.slider_state.pressure,
                     }
@@ -820,7 +823,7 @@ impl InternalChuniioProxyServer {
             }
             // --- Expose full IO state to native client ---
             ChuniMessage::JvsFullStateRead => {
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::JvsFullStateReadResponse {
                         opbtn: state.jvs_state.opbtn,
                         beams: state.jvs_state.beams,
@@ -841,7 +844,7 @@ impl InternalChuniioProxyServer {
                 // Update slider state and send input events
                 info!("Client {} slider input: pressure={:?}", client_id, pressure);
                 // Use try_write for non-blocking state update
-                if let Ok(mut state) = protocol_state.try_write() {
+                if let Some(mut state) = protocol_state.try_write() {
                     state.slider_state.pressure = pressure;
                 } else {
                     warn!("Could not acquire state lock for slider input update");

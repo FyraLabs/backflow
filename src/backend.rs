@@ -494,7 +494,14 @@ impl Backend {
                                         packet.device_id,
                                         backend_name
                                     );
-
+                                    let span = tracing::span!(
+                                        tracing::Level::TRACE,
+                                        "send_packet_to_backend",
+                                        backend = %backend_name,
+                                        device_id = %packet.device_id,
+                                        event_count = packet.events.len()
+                                    );
+                                    let _enter = span.enter();
                                     if let Err(e) = output_stream.send(packet).await {
                                         tracing::error!(
                                             "Failed to send packet to {} backend: {}",

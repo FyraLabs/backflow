@@ -6,6 +6,7 @@ mod input;
 mod output;
 mod protos;
 use eyre::Result;
+use tracing_subscriber::{layer::SubscriberExt, Layer};
 
 pub const PACKET_PROCESSING_TARGET: &str = "backflow::packet_processing";
 pub const CHANNEL_BUFFER_SIZE: usize = 2000; // Size of the channel buffer for input events
@@ -28,15 +29,19 @@ pub fn build_logger() -> Result<()> {
         // .add_directive("Backflow=trace".parse().unwrap())
     });
 
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE) // Global ceiling - allows up to TRACE
-        .with_env_filter(env_filter) // Runtime filtering with custom rules
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true)
-        .try_init()
-        .map_err(|e| eyre::eyre!("Failed to initialize logger: {}", e))?;
+    // Set up Tracy profiling layer in addition to normal logging
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(tracing_tracy::TracyLayer::default())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_thread_ids(true)
+                    .with_thread_names(true)
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_filter(env_filter)
+            )
+    ).map_err(|e| eyre::eyre!("Failed to initialize logger: {}", e))?;
 
     Ok(())
 }
