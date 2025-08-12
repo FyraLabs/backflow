@@ -408,109 +408,146 @@ impl ChuniioProxyServer {
     /// Handle a single keyboard event and update protocol state accordingly
     #[inline]
     fn handle_keyboard_event(state: &mut ChuniProtocolState, event: &InputEvent) {
-        if let InputEvent::Keyboard(KeyboardEvent::KeyPress { key })
-        | InputEvent::Keyboard(KeyboardEvent::KeyRelease { key }) = event
-        {
-            let pressed = matches!(event, InputEvent::Keyboard(KeyboardEvent::KeyPress { .. }));
+        match event {
+            InputEvent::Keyboard(KeyboardEvent::KeyPress { key })
+            | InputEvent::Keyboard(KeyboardEvent::KeyRelease { key }) => {
+                let pressed = matches!(event, InputEvent::Keyboard(KeyboardEvent::KeyPress { .. }));
 
-            // Coin input
-            if key == "CHUNIIO_COIN" {
-                if pressed {
-                    state.coin_counter += 1;
-                    trace!("Batch: Coin inserted, counter now: {}", state.coin_counter);
-                }
-                return;
-            }
-
-            // Test button
-            if key == "CHUNIIO_TEST" {
-                if pressed {
-                    state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
-                } else {
-                    state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
-                }
-                trace!(
-                    "Batch: Test button {}",
-                    if pressed { "pressed" } else { "released" }
-                );
-                return;
-            }
-
-            // Service button
-            if key == "CHUNIIO_SERVICE" {
-                if pressed {
-                    state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
-                } else {
-                    state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
-                }
-                trace!(
-                    "Batch: Service button {}",
-                    if pressed { "pressed" } else { "released" }
-                );
-                return;
-            }
-
-            // Slider region
-            if let Some(region_str) = key.strip_prefix("CHUNIIO_SLIDER_") {
-                if let Ok(region) = region_str.parse::<u8>() {
-                    if region < 32 {
-                        let pressure = if pressed { 255 } else { 0 };
-                        state.slider_state.pressure[region as usize] = pressure;
-                        trace!("Batch: Slider region {} pressure {}", region, pressure);
-                    }
-                }
-                return;
-            }
-
-            // IR beam
-            if let Some(beam_str) = key.strip_prefix("CHUNIIO_IR_") {
-                if let Ok(beam) = beam_str.parse::<u8>() {
-                    if beam < 6 {
+                match key.as_str() {
+                    "CHUNIIO_COIN" => {
                         if pressed {
-                            state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam blocked)
+                            state.coin_counter += 1;
+                            trace!("Batch: Coin inserted, counter now: {}", state.coin_counter);
+                        }
+                    }
+                    "CHUNIIO_TEST" => {
+                        if pressed {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
                         } else {
-                            state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam clear)
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
                         }
                         trace!(
-                            "Batch: IR beam {} {}",
-                            beam,
-                            if pressed { "blocked" } else { "clear" }
+                            "Batch: Test button {}",
+                            if pressed { "pressed" } else { "released" }
                         );
                     }
+                    "CHUNIIO_SERVICE" => {
+                        if pressed {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
+                        }
+                        trace!(
+                            "Batch: Service button {}",
+                            if pressed { "pressed" } else { "released" }
+                        );
+                    }
+                    _ if key.starts_with("CHUNIIO_SLIDER_") => {
+                        if let Some(region_str) = key.strip_prefix("CHUNIIO_SLIDER_") {
+                            if let Ok(region) = region_str.parse::<u8>() {
+                                if region < 32 {
+                                    let pressure = if pressed { 255 } else { 0 };
+                                    state.slider_state.pressure[region as usize] = pressure;
+                                    trace!("Batch: Slider region {} pressure {}", region, pressure);
+                                }
+                            }
+                        }
+                    }
+                    _ if key.starts_with("CHUNIIO_IR_") => {
+                        if let Some(beam_str) = key.strip_prefix("CHUNIIO_IR_") {
+                            if let Ok(beam) = beam_str.parse::<u8>() {
+                                if beam < 6 {
+                                    if pressed {
+                                        state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam blocked)
+                                    } else {
+                                        state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam clear)
+                                    }
+                                    trace!(
+                                        "Batch: IR beam {} {}",
+                                        beam,
+                                        if pressed { "blocked" } else { "clear" }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-        }
 
-        if let InputEvent::Analog(AnalogEvent { keycode, value }) = event {
-            // Handle custom analog events
-            if keycode.starts_with("CHUNIIO_SLIDER_") {
-                if let Some(region_str) = keycode.strip_prefix("CHUNIIO_SLIDER_") {
-                    if let Ok(region) = region_str.parse::<u8>() {
-                        if region < 32 {
-                            state.slider_state.pressure[region as usize] = (*value * 255.0) as u8;
-                            trace!("Batch: Slider region {} analog value {}", region, value);
+            InputEvent::Analog(AnalogEvent { keycode, value }) => {
+                const ANALOG_MINIMUM_THRESHOLD: f32 = 0.5;
+                match keycode.as_str() {
+                    k if k.starts_with("CHUNIIO_SLIDER_") => {
+                        if let Some(region_str) = k.strip_prefix("CHUNIIO_SLIDER_") {
+                            if let Ok(region) = region_str.parse::<u8>() {
+                                if region < 32 {
+                                    let pressure = (*value).floor().clamp(0.0, 255.0) as u8;
+                                    state.slider_state.pressure[region as usize] = pressure;
+                                    trace!(
+                                        "Batch: Slider region {} analog value {} (clamped to {})",
+                                        region, value, pressure
+                                    );
+                                }
+                            }
                         }
                     }
-                }
-            } else if keycode.starts_with("CHUNIIO_IR_") {
-                if let Some(beam_str) = keycode.strip_prefix("CHUNIIO_IR_") {
-                    if let Ok(beam) = beam_str.parse::<u8>() {
-                        if beam < 6 {
-                            // Handle IR analog events (if needed)
-                            trace!("Batch: IR beam {} analog value {}", beam, value);
+                    k if k.starts_with("CHUNIIO_IR_") => {
+                        if let Some(beam_str) = k.strip_prefix("CHUNIIO_IR_") {
+                            if let Ok(beam) = beam_str.parse::<u8>() {
+                                if beam < 6 {
+                                    trace!("Batch: IR beam {} analog value {}", beam, value);
+
+                                    if *value > ANALOG_MINIMUM_THRESHOLD {
+                                        state.jvs_state.beams |= 1 << beam; // Set beam bit when analog value is above threshold (beam blocked)
+                                        trace!(
+                                            "Batch: IR beam {} analog blocked (value: {})",
+                                            beam, value
+                                        );
+                                    } else {
+                                        state.jvs_state.beams &= !(1 << beam); // Clear beam bit when analog value is below threshold (beam clear)
+                                        trace!(
+                                            "Batch: IR beam {} analog clear (value: {})",
+                                            beam, value
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
+                    "CHUNIIO_COIN" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.coin_counter += value.floor() as u16;
+                            trace!(
+                                "Batch: Coin analog event, added {} coins, counter now: {}",
+                                value.floor() as u16,
+                                state.coin_counter
+                            );
+                        }
+                    }
+                    "CHUNIIO_TEST" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
+                            trace!("Batch: Test button analog pressed (value: {})", value);
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
+                            trace!("Batch: Test button analog released (value: {})", value);
+                        }
+                    }
+                    "CHUNIIO_SERVICE" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
+                            trace!("Batch: Service button analog pressed (value: {})", value);
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
+                            trace!("Batch: Service button analog released (value: {})", value);
+                        }
+                    }
+                    _ => {}
                 }
-            } else if keycode.starts_with("CHUNIIO_COIN") {
-                // Handle coin analog events (if needed)
-                if *value > 0.5 {
-                    state.coin_counter += value.floor() as u16;
-                    trace!("Batch: Coin analog event, added {} coins, counter now: {}", value.floor() as u32, state.coin_counter);
-                }
-            } else if keycode.starts_with("CHUNIIO_TEST") || keycode.starts_with("CHUNIIO_SERVICE") {
-                // Handle test/service analog events (if needed)
-                trace!("Batch: Test/Service analog event for key {}", keycode);
             }
+
+            _ => {}
         }
     }
 }
