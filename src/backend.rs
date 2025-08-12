@@ -10,7 +10,7 @@ use crate::input::{InputBackend, InputEventStream};
 use crate::output::{OutputBackend, OutputBackendType};
 use eyre::Result;
 use futures::future::select_all;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -175,13 +175,13 @@ pub struct MessageStreams {
     /// Feedback events for all backends
     pub feedback: FeedbackEventStream,
     /// Output streams keyed by backend name
-    output_streams: HashMap<String, InputEventStream>,
+    output_streams: FxHashMap<String, InputEventStream>,
 }
 
 impl MessageStreams {
     /// Create a new MessageStreams with default output backends
     pub fn new() -> Self {
-        let mut output_streams = HashMap::new();
+        let mut output_streams = FxHashMap::default();
 
         // Register default output stream backends
         output_streams.insert("uinput".to_string(), InputEventStream::new());
@@ -469,7 +469,7 @@ impl Backend {
                     match device_filter.transform_packet(packet) {
                         Ok(transformed_packet) => {
                             // Group events by destination backend
-                            let mut backend_events: HashMap<String, Vec<crate::input::InputEvent>> = HashMap::new();
+                            let mut backend_events: FxHashMap<String, Vec<crate::input::InputEvent>> = FxHashMap::default();
 
                             for event in &transformed_packet.events {
                                 if let Some(backend_name) = event_router.route_event(event, Some(&device_filter), &transformed_packet.device_id) {

@@ -11,11 +11,13 @@ members = ["crates/zbus-inputplumber"]
 async-trait = "0.1.83"
 axum = { version = "0.8.4", features = ["ws"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
+dirs = "6.0.0"
 evdev = { version = "0.13.1", features = ["tokio", "stream-trait"] }
 eyre = "0.6.12"
 futures = "0.3.31"
 futures-util = "0.3.31"
 nix = "0.30.1"
+rustc-hash = "2.1.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
