@@ -88,7 +88,7 @@ use crate::feedback::generators::chuni_jvs::{ChuniLedDataPacket, LedBoardData, R
 use crate::input::atomic::{AtomicInputProcessor, BatchingConfig};
 use crate::input::brokenithm::{BoardInputState, get_brokenithm_state};
 use crate::input::{
-    InputEvent, InputEventPacket, InputEventReceiver, InputEventStream, KeyboardEvent,
+    AnalogEvent, InputEvent, InputEventPacket, InputEventReceiver, InputEventStream, KeyboardEvent,
 };
 use crate::output::OutputBackend;
 use crate::protos::chuniio::{
@@ -478,6 +478,38 @@ impl ChuniioProxyServer {
                         );
                     }
                 }
+            }
+        }
+
+        if let InputEvent::Analog(AnalogEvent { keycode, value }) = event {
+            // Handle custom analog events
+            if keycode.starts_with("CHUNIIO_SLIDER_") {
+                if let Some(region_str) = keycode.strip_prefix("CHUNIIO_SLIDER_") {
+                    if let Ok(region) = region_str.parse::<u8>() {
+                        if region < 32 {
+                            state.slider_state.pressure[region as usize] = (*value * 255.0) as u8;
+                            trace!("Batch: Slider region {} analog value {}", region, value);
+                        }
+                    }
+                }
+            } else if keycode.starts_with("CHUNIIO_IR_") {
+                if let Some(beam_str) = keycode.strip_prefix("CHUNIIO_IR_") {
+                    if let Ok(beam) = beam_str.parse::<u8>() {
+                        if beam < 6 {
+                            // Handle IR analog events (if needed)
+                            trace!("Batch: IR beam {} analog value {}", beam, value);
+                        }
+                    }
+                }
+            } else if keycode.starts_with("CHUNIIO_COIN") {
+                // Handle coin analog events (if needed)
+                if *value > 0.5 {
+                    state.coin_counter += value.floor() as u16;
+                    trace!("Batch: Coin analog event, added {} coins, counter now: {}", value.floor() as u32, state.coin_counter);
+                }
+            } else if keycode.starts_with("CHUNIIO_TEST") || keycode.starts_with("CHUNIIO_SERVICE") {
+                // Handle test/service analog events (if needed)
+                trace!("Batch: Test/Service analog event for key {}", keycode);
             }
         }
     }
