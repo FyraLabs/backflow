@@ -6,7 +6,7 @@ mod input;
 mod output;
 mod protos;
 use eyre::Result;
-use tracing_subscriber::{layer::SubscriberExt, Layer};
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 pub const PACKET_PROCESSING_TARGET: &str = "backflow::packet_processing";
 pub const CHANNEL_BUFFER_SIZE: usize = 2000; // Size of the channel buffer for input events
@@ -39,9 +39,10 @@ pub fn build_logger() -> Result<()> {
                     .with_thread_names(true)
                     .with_file(true)
                     .with_line_number(true)
-                    .with_filter(env_filter)
-            )
-    ).map_err(|e| eyre::eyre!("Failed to initialize logger: {}", e))?;
+                    .with_filter(env_filter),
+            ),
+    )
+    .map_err(|e| eyre::eyre!("Failed to initialize logger: {}", e))?;
 
     Ok(())
 }
