@@ -16,6 +16,31 @@ pub struct AppConfig {
     /// Per-device configurations for filtering and remapping
     #[serde(default)]
     pub device: HashMap<String, DeviceConfig>,
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
+}
+
+/// "Plugins" for Backflow
+///
+/// Backflow supports plugins that act as dedicated backend/frontends for devices the main tree.
+///
+/// These plugins are essentially just executables that communicate through Backflow through
+/// standard I/O interfaces.
+///
+/// Once configured, Backflow will simply manage this process, and read/write Input/Feedback events from the
+/// program.
+///
+/// The protocol is exactly the same as the UDS (Unix Domain Socket) or WebSockets implementation, AKA standard Backflow
+/// event messages
+///
+/// This is similar to how chess engines have the UCI (Universal Chess Interface) for communication.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PluginConfig {
+    /// Path to the plugin executable
+    pub command: String,
+    /// Optional CLI arguments to pass to the plugin, if need be.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl AppConfig {
