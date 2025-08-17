@@ -88,17 +88,18 @@ use crate::feedback::generators::chuni_jvs::{ChuniLedDataPacket, LedBoardData, R
 use crate::input::atomic::{AtomicInputProcessor, BatchingConfig};
 use crate::input::brokenithm::{BoardInputState, get_brokenithm_state};
 use crate::input::{
-    InputEvent, InputEventPacket, InputEventReceiver, InputEventStream, KeyboardEvent,
+    AnalogEvent, InputEvent, InputEventPacket, InputEventReceiver, InputEventStream, KeyboardEvent,
 };
 use crate::output::OutputBackend;
 use crate::protos::chuniio::{
     CHUNI_IO_OPBTN_SERVICE, CHUNI_IO_OPBTN_TEST, ChuniFeedbackEvent, ChuniInputEvent, ChuniMessage,
     ChuniProtocolState,
 };
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tracing::{error, info, trace, warn};
 
 /// Default socket path for chuniio proxy
@@ -268,7 +269,7 @@ impl OutputBackend for ChuniioProxyServer {
                     if let Some(brokenithm_state) = get_brokenithm_state().await {
                         // Only apply state if it has changed to avoid redundant updates
                         if brokenithm_state_changed(&brokenithm_state, &self.board_state) {
-                            let mut chuniio_state = self.protocol_state.write().await;
+                            let mut chuniio_state = self.protocol_state.write();
                             tracing::trace!(
                                 "Brokenithm state changed, applying to chuniio state: air={:?}, slider={:?}, test={}, service={}, coin_pulse={}",
                                 brokenithm_state.air,
@@ -300,6 +301,13 @@ impl OutputBackend for ChuniioProxyServer {
                     tracing::trace!("Received input packet from application");
                     match packet {
                         Some(packet) => {
+                            let span = tracing::span!(
+                                tracing::Level::TRACE,
+                                "receive_input_packet_send_to_atomic",
+                                device_id = %packet.device_id,
+                                event_count = packet.events.len()
+                            );
+                            let _enter = span.enter();
                             // Skip atomic processing here since input sources (like WebSocket)
                             // already handle their own atomicity and batching.
                             // Direct processing prevents double-atomicity conflicts.
@@ -328,7 +336,7 @@ impl OutputBackend for ChuniioProxyServer {
 
                             trace!("Processing chuniio event in proxy: {:?}", event);
                             // Update internal state - use blocking write to ensure all events are processed
-                            let mut state = self.protocol_state.write().await;
+                            let mut state = self.protocol_state.write();
                             state.process_input_event(event);
                             trace!("Updated proxy state - opbtn: {}, beams: {}, coins: {}\nslider: {:?}",
                                   state.jvs_state.opbtn, state.jvs_state.beams, state.coin_counter, state.slider_state.pressure);
@@ -356,7 +364,7 @@ impl OutputBackend for ChuniioProxyServer {
 
 impl ChuniioProxyServer {
     /// Process atomic input packets from the atomic processor and convert to chuniio events
-    #[tracing::instrument(level = "debug", skip_all, fields(events = packet.events.len()), err)]
+    #[tracing::instrument( skip_all, fields(events = packet.events.len()), err)]
     async fn process_atomic_input_packet(
         &mut self,
         packet: InputEventPacket,
@@ -369,17 +377,11 @@ impl ChuniioProxyServer {
         );
 
         // Extract current state and apply all changes atomically
-        let mut state = self.protocol_state.write().await;
+        let mut state = self.protocol_state.write();
 
         // Apply all events in the batch
         for event in &packet.events {
-            match event {
-                InputEvent::Keyboard(KeyboardEvent::KeyPress { .. })
-                | InputEvent::Keyboard(KeyboardEvent::KeyRelease { .. }) => {
-                    Self::handle_keyboard_event(&mut state, event);
-                }
-                _ => {}
-            }
+            Self::handle_keyboard_event(&mut state, event);
         }
 
         // collect active slider regions for debug
@@ -406,79 +408,149 @@ impl ChuniioProxyServer {
     }
 
     /// Handle a single keyboard event and update protocol state accordingly
-    #[inline]
+    #[inline(always)]
+    #[tracing::instrument(skip(state, event), fields(key = %format!("{:?}", event)))]
     fn handle_keyboard_event(state: &mut ChuniProtocolState, event: &InputEvent) {
-        if let InputEvent::Keyboard(KeyboardEvent::KeyPress { key })
-        | InputEvent::Keyboard(KeyboardEvent::KeyRelease { key }) = event
-        {
-            let pressed = matches!(event, InputEvent::Keyboard(KeyboardEvent::KeyPress { .. }));
+        match event {
+            InputEvent::Keyboard(KeyboardEvent::KeyPress { key })
+            | InputEvent::Keyboard(KeyboardEvent::KeyRelease { key }) => {
+                let pressed = matches!(event, InputEvent::Keyboard(KeyboardEvent::KeyPress { .. }));
 
-            // Coin input
-            if key == "CHUNIIO_COIN" {
-                if pressed {
-                    state.coin_counter += 1;
-                    trace!("Batch: Coin inserted, counter now: {}", state.coin_counter);
-                }
-                return;
-            }
-
-            // Test button
-            if key == "CHUNIIO_TEST" {
-                if pressed {
-                    state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
-                } else {
-                    state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
-                }
-                trace!(
-                    "Batch: Test button {}",
-                    if pressed { "pressed" } else { "released" }
-                );
-                return;
-            }
-
-            // Service button
-            if key == "CHUNIIO_SERVICE" {
-                if pressed {
-                    state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
-                } else {
-                    state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
-                }
-                trace!(
-                    "Batch: Service button {}",
-                    if pressed { "pressed" } else { "released" }
-                );
-                return;
-            }
-
-            // Slider region
-            if let Some(region_str) = key.strip_prefix("CHUNIIO_SLIDER_") {
-                if let Ok(region) = region_str.parse::<u8>() {
-                    if region < 32 {
-                        let pressure = if pressed { 255 } else { 0 };
-                        state.slider_state.pressure[region as usize] = pressure;
-                        trace!("Batch: Slider region {} pressure {}", region, pressure);
-                    }
-                }
-                return;
-            }
-
-            // IR beam
-            if let Some(beam_str) = key.strip_prefix("CHUNIIO_IR_") {
-                if let Ok(beam) = beam_str.parse::<u8>() {
-                    if beam < 6 {
+                match key.as_str() {
+                    "CHUNIIO_COIN" => {
                         if pressed {
-                            state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam clear)
+                            state.coin_counter += 1;
+                            trace!("Batch: Coin inserted, counter now: {}", state.coin_counter);
+                        }
+                    }
+                    "CHUNIIO_TEST" => {
+                        if pressed {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
                         } else {
-                            state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam blocked)
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
                         }
                         trace!(
-                            "Batch: IR beam {} {}",
-                            beam,
-                            if pressed { "clear" } else { "blocked" }
+                            "Batch: Test button {}",
+                            if pressed { "pressed" } else { "released" }
                         );
                     }
+                    "CHUNIIO_SERVICE" => {
+                        if pressed {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
+                        }
+                        trace!(
+                            "Batch: Service button {}",
+                            if pressed { "pressed" } else { "released" }
+                        );
+                    }
+                    _ if key.starts_with("CHUNIIO_SLIDER_") => {
+                        if let Some(region_str) = key.strip_prefix("CHUNIIO_SLIDER_") {
+                            if let Ok(region) = region_str.parse::<u8>() {
+                                if region < 32 {
+                                    let pressure = if pressed { 255 } else { 0 };
+                                    state.slider_state.pressure[region as usize] = pressure;
+                                    trace!("Batch: Slider region {} pressure {}", region, pressure);
+                                }
+                            }
+                        }
+                    }
+                    _ if key.starts_with("CHUNIIO_IR_") => {
+                        if let Some(beam_str) = key.strip_prefix("CHUNIIO_IR_") {
+                            if let Ok(beam) = beam_str.parse::<u8>() {
+                                if beam < 6 {
+                                    if pressed {
+                                        state.jvs_state.beams |= 1 << beam; // Set beam bit when pressed (beam blocked)
+                                    } else {
+                                        state.jvs_state.beams &= !(1 << beam); // Clear beam bit when released (beam clear)
+                                    }
+                                    trace!(
+                                        "Batch: IR beam {} {}",
+                                        beam,
+                                        if pressed { "blocked" } else { "clear" }
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
+
+            InputEvent::Analog(AnalogEvent { keycode, value }) => {
+                const ANALOG_MINIMUM_THRESHOLD: f32 = 0.5;
+                match keycode.as_str() {
+                    k if k.starts_with("CHUNIIO_SLIDER_") => {
+                        if let Some(region_str) = k.strip_prefix("CHUNIIO_SLIDER_") {
+                            if let Ok(region) = region_str.parse::<u8>() {
+                                if region < 32 {
+                                    let pressure = (*value).floor().clamp(0.0, 255.0) as u8;
+                                    state.slider_state.pressure[region as usize] = pressure;
+                                    trace!(
+                                        "Batch: Slider region {} analog value {} (clamped to {})",
+                                        region, value, pressure
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    k if k.starts_with("CHUNIIO_IR_") => {
+                        if let Some(beam_str) = k.strip_prefix("CHUNIIO_IR_") {
+                            if let Ok(beam) = beam_str.parse::<u8>() {
+                                if beam < 6 {
+                                    trace!("Batch: IR beam {} analog value {}", beam, value);
+
+                                    if *value > ANALOG_MINIMUM_THRESHOLD {
+                                        state.jvs_state.beams |= 1 << beam; // Set beam bit when analog value is above threshold (beam blocked)
+                                        trace!(
+                                            "Batch: IR beam {} analog blocked (value: {})",
+                                            beam, value
+                                        );
+                                    } else {
+                                        state.jvs_state.beams &= !(1 << beam); // Clear beam bit when analog value is below threshold (beam clear)
+                                        trace!(
+                                            "Batch: IR beam {} analog clear (value: {})",
+                                            beam, value
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "CHUNIIO_COIN" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.coin_counter += value.floor() as u16;
+                            trace!(
+                                "Batch: Coin analog event, added {} coins, counter now: {}",
+                                value.floor() as u16,
+                                state.coin_counter
+                            );
+                        }
+                    }
+                    "CHUNIIO_TEST" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_TEST;
+                            trace!("Batch: Test button analog pressed (value: {})", value);
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_TEST;
+                            trace!("Batch: Test button analog released (value: {})", value);
+                        }
+                    }
+                    "CHUNIIO_SERVICE" => {
+                        if *value > ANALOG_MINIMUM_THRESHOLD {
+                            state.jvs_state.opbtn |= CHUNI_IO_OPBTN_SERVICE;
+                            trace!("Batch: Service button analog pressed (value: {})", value);
+                        } else {
+                            state.jvs_state.opbtn &= !CHUNI_IO_OPBTN_SERVICE;
+                            trace!("Batch: Service button analog released (value: {})", value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            _ => {}
         }
     }
 }
@@ -539,7 +611,7 @@ impl InternalChuniioProxyServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let client_id = {
-                        let mut next_id = self.next_client_id.write().await;
+                        let mut next_id = self.next_client_id.write();
                         let id = *next_id;
                         *next_id += 1;
                         id
@@ -714,7 +786,7 @@ impl InternalChuniioProxyServer {
         match message {
             ChuniMessage::JvsPoll => {
                 // Return current JVS state - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::JvsPollResponse {
                         opbtn: state.jvs_state.opbtn,
                         beams: state.jvs_state.beams,
@@ -729,7 +801,7 @@ impl InternalChuniioProxyServer {
             }
             ChuniMessage::CoinCounterRead => {
                 // Return current coin count - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::CoinCounterReadResponse {
                         count: state.coin_counter,
                     }
@@ -740,7 +812,7 @@ impl InternalChuniioProxyServer {
             }
             ChuniMessage::SliderStateRead => {
                 // Return current slider state - use try_read for non-blocking access
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::SliderStateReadResponse {
                         pressure: state.slider_state.pressure,
                     }
@@ -751,7 +823,7 @@ impl InternalChuniioProxyServer {
             }
             // --- Expose full IO state to native client ---
             ChuniMessage::JvsFullStateRead => {
-                let response = if let Ok(state) = protocol_state.try_read() {
+                let response = if let Some(state) = protocol_state.try_read() {
                     ChuniMessage::JvsFullStateReadResponse {
                         opbtn: state.jvs_state.opbtn,
                         beams: state.jvs_state.beams,
@@ -772,7 +844,7 @@ impl InternalChuniioProxyServer {
                 // Update slider state and send input events
                 info!("Client {} slider input: pressure={:?}", client_id, pressure);
                 // Use try_write for non-blocking state update
-                if let Ok(mut state) = protocol_state.try_write() {
+                if let Some(mut state) = protocol_state.try_write() {
                     state.slider_state.pressure = pressure;
                 } else {
                     warn!("Could not acquire state lock for slider input update");

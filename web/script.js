@@ -115,14 +115,14 @@ class WebSocketHandler {
   getCellByLedId(ledId) {
     const elementWithLedId = document.querySelector(`[data-led-id="${ledId}"]`);
     console.log(`Getting cell for LED ID ${ledId}:`, elementWithLedId);
-    
+
     // For separator LED IDs (odd numbers 1-29), return the adjacent keys for border glow
     if (ledId >= 1 && ledId <= 29 && ledId % 2 === 1) {
       const leftKeyId = ledId - 1;
       const rightKeyId = ledId + 1;
       const leftKey = document.querySelector(`[data-led-id="${leftKeyId}"]`);
       const rightKey = document.querySelector(`[data-led-id="${rightKeyId}"]`);
-      
+
       // Return a special object that represents the separator between keys
       return {
         isSeparator: true,
@@ -131,14 +131,14 @@ class WebSocketHandler {
         rightKey: rightKey
       };
     }
-    
+
     return elementWithLedId || null;
   }
 
   applyLedToCell(cell, on, brightness, rgb) {
     // Check if this is a separator (border glow) request
     const isSeparator = cell && cell.isSeparator;
-    
+
     console.log(
       `LED Apply - Cell:`,
       cell,
@@ -191,9 +191,9 @@ class WebSocketHandler {
 
     if (isSeparator) {
       console.log(`Applying separator border line with color: ${color}`);
-      
+
       const glowColor = `rgba(${r}, ${g}, ${b}, 0.9)`;
-      
+
       // Apply border glow to adjacent keys
       if (cell.leftKey) {
         cell.leftKey.style.setProperty("--glow-color", glowColor);
@@ -205,7 +205,7 @@ class WebSocketHandler {
         cell.rightKey.classList.add("border-glow-left");
         this.updateCellShadows(cell.rightKey);
       }
-      
+
       console.log(`Applied border line to separator ${cell.ledId} between keys`);
     } else if (cell && cell.classList) {
       cell.setAttribute("data-rgb-color", color);
@@ -213,14 +213,14 @@ class WebSocketHandler {
 
       const glowColor = `rgba(${r}, ${g}, ${b}, 0.6)`;
       cell.style.setProperty("--key-glow-color", glowColor);
-      
+
       // Build box-shadow combining key LED and border glow effects
       let shadows = [`inset 0 0 20px ${glowColor}`];
-      
+
       // Add border lines if they exist
       const hasLeftGlow = cell.classList.contains("border-glow-left");
       const hasRightGlow = cell.classList.contains("border-glow-right");
-      
+
       if (hasLeftGlow && hasRightGlow) {
         shadows.push(
           `inset 3px 0 0 var(--glow-color, rgba(255, 255, 255, 0.9))`,
@@ -235,7 +235,7 @@ class WebSocketHandler {
           `inset -3px 0 0 var(--glow-color, rgba(255, 255, 255, 0.9))`
         );
       }
-      
+
       cell.style.boxShadow = shadows.join(', ');
       cell.classList.add("rgb-active");
     }
@@ -243,24 +243,24 @@ class WebSocketHandler {
 
   updateCellShadows(cell) {
     if (!cell || !cell.classList) return;
-    
+
     const isActive = cell.classList.contains("rgb-active");
     const hasLeftGlow = cell.classList.contains("border-glow-left");
     const hasRightGlow = cell.classList.contains("border-glow-right");
-    
+
     if (!isActive && !hasLeftGlow && !hasRightGlow) {
       cell.style.removeProperty("box-shadow");
       return;
     }
-    
+
     let shadows = [];
-    
+
     // Add key LED shadow if active
     if (isActive) {
       const keyGlowColor = cell.style.getPropertyValue("--key-glow-color") || "rgba(255, 255, 255, 0.6)";
       shadows.push(`inset 0 0 20px ${keyGlowColor}`);
     }
-    
+
     // Add border lines
     if (hasLeftGlow && hasRightGlow) {
       shadows.push(
@@ -276,7 +276,7 @@ class WebSocketHandler {
         `inset -3px 0 0 var(--glow-color, rgba(255, 255, 255, 0.9))`
       );
     }
-    
+
     cell.style.boxShadow = shadows.join(', ');
   }
 
@@ -483,15 +483,6 @@ class GridController {
           this.activeTouches.set(touchId, targetCell);
         }
 
-        // Handle cell transitions - ensure previous cell is properly released
-        if (prevCell && (!targetCell || prevCell.index !== targetCell.index)) {
-          // Force release of previous cell in current state
-          newKeyStates[prevCell.index] = 0;
-          console.log(
-            `Touch ${touchId}: releasing previous cell ${prevCell.index} (${prevCell.ref?.getAttribute("data-key")})`,
-          );
-        }
-
         // Update tracking for this touch
         if (targetCell) {
           this.touchToCell.set(touchId, targetCell);
@@ -501,43 +492,44 @@ class GridController {
         }
       }
 
-      // Second pass: set active cells
+      // Clean up touches that are no longer active
+      for (const touchId of this.activeTouches.keys()) {
+        if (!currentTouchIds.has(touchId)) {
+          this.touchToCell.delete(touchId);
+          this.activeTouches.delete(touchId);
+          console.log(`Touch ${touchId}: ended`);
+        }
+      }
+
+      // Second pass: set active cells based on all remaining touches
+      // Count how many touches are on each cell
+      const cellTouchCounts = new Array(this.keyStates.length).fill(0);
+
       for (let i = 0; i < e.touches.length; i++) {
         const touch = e.touches[i];
         const touchId = touch.identifier;
         const targetCell = this.touchToCell.get(touchId);
 
         if (targetCell) {
-          this.setKey(newKeyStates, targetCell.index, 1);
+          cellTouchCounts[targetCell.index]++;
 
           // Only allow sliding if sliderEnabled is true for this cell
           if (targetCell.sliderEnabled && !targetCell.isAirSensor) {
             const x = touch.clientX;
             if (x < targetCell.almostLeft && targetCell.prevIndex !== null) {
-              this.setKey(newKeyStates, targetCell.prevIndex, 1);
+              cellTouchCounts[targetCell.prevIndex]++;
             }
 
             if (x > targetCell.almostRight && targetCell.nextIndex !== null) {
-              this.setKey(newKeyStates, targetCell.nextIndex, 1);
+              cellTouchCounts[targetCell.nextIndex]++;
             }
           }
         }
       }
 
-      // Clean up touches that are no longer active
-      for (const touchId of this.activeTouches.keys()) {
-        if (!currentTouchIds.has(touchId)) {
-          // Release the cell for this touch
-          const prevCell = this.touchToCell && this.touchToCell.get(touchId);
-          if (prevCell) {
-            newKeyStates[prevCell.index] = 0;
-            this.touchToCell.delete(touchId);
-            console.log(
-              `Touch ${touchId}: ended, releasing cell ${prevCell.index} (${prevCell.ref?.getAttribute("data-key")})`,
-            );
-          }
-          this.activeTouches.delete(touchId);
-        }
+      // Set key states based on touch counts (any cell with > 0 touches is active)
+      for (let i = 0; i < cellTouchCounts.length; i++) {
+        newKeyStates[i] = cellTouchCounts[i] > 0 ? 1 : 0;
       }
 
       for (let i = 0; i < this.compiledCells.length; i++) {
@@ -635,7 +627,7 @@ class GridController {
       if (e.target.classList.contains("grid-cell")) {
         e.preventDefault();
         this.updateTouches({
-          preventDefault: () => {},
+          preventDefault: () => { },
           touches: [{ clientX: e.clientX, clientY: e.clientY }],
         });
       }
@@ -643,14 +635,14 @@ class GridController {
 
     container.addEventListener("mouseup", (e) => {
       this.updateTouches({
-        preventDefault: () => {},
+        preventDefault: () => { },
         touches: [],
       });
     });
 
     container.addEventListener("mouseleave", (e) => {
       this.updateTouches({
-        preventDefault: () => {},
+        preventDefault: () => { },
         touches: [],
       });
     });

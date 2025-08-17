@@ -35,15 +35,33 @@ impl AppConfig {
 
     /// Load configuration with fallback to defaults
     pub fn load_or_default() -> Self {
-        // Try to load from standard locations
-        // for now, backflow.toml is the only config file in the current directory
-        let config_paths = [std::path::PathBuf::from("backflow.toml")];
+        // Try to load from standard locations in order: CWD > .config > /etc
+        let config_paths = [
+            std::path::PathBuf::from("backflow.toml"),
+            dirs::config_dir()
+                .map(|config_dir| config_dir.join("backflow.toml"))
+                .unwrap_or_else(|| PathBuf::from("backflow.toml")),
+            std::path::PathBuf::from("/etc/backflow/backflow.toml"),
+        ];
 
         for path in &config_paths {
-            if let Ok(mut config) = Self::from_file(path) {
-                tracing::info!("Loaded configuration from: {}", path.display());
-                config.validate_and_fix();
-                return config;
+            if path.exists() {
+                match Self::from_file(path) {
+                    Ok(mut config) => {
+                        tracing::info!("Loaded configuration from: {}", path.display());
+                        config.validate_and_fix();
+                        return config;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load config from {}: {}. Trying next location.",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+                // Only try the first existing config file
+                break;
             }
         }
 
@@ -129,7 +147,12 @@ fn default_unix_socket_path() -> PathBuf {
         return PathBuf::from(env_path);
     }
     let uid = nix::unistd::Uid::effective().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/backflow"))
+    if uid == 0 {
+        // If running as root, use /run/backflow directly
+        PathBuf::from("/run/backflow")
+    } else {
+        PathBuf::from(format!("/run/user/{uid}/backflow"))
+    }
 }
 
 // set web.enabled = false in [input.web] to explicitly disable the web backend

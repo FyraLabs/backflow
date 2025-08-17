@@ -836,7 +836,7 @@ pub async fn bidirectional_ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, addr, state, is_write_only))
 }
 /// Handles a single WebSocket message for a client. Returns true if the connection should break/close.
-#[tracing::instrument(skip_all, fields(msg))]
+#[tracing::instrument(skip_all, fields(addr = %addr))]
 async fn handle_websocket_message(
     msg: Result<Message, axum::Error>,
     addr: SocketAddr,
