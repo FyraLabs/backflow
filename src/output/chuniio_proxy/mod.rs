@@ -83,7 +83,6 @@
 //!
 //! All multi-byte integers are transmitted in little-endian format.
 
-use crate::feedback::FeedbackEventStream;
 use crate::feedback::generators::chuni_jvs::{ChuniLedDataPacket, LedBoardData, Rgb};
 use crate::input::atomic::{AtomicInputProcessor, BatchingConfig};
 use crate::input::brokenithm::{BoardInputState, get_brokenithm_state};
@@ -162,7 +161,6 @@ pub struct ChuniioProxyServer {
     protocol_state: Arc<RwLock<ChuniProtocolState>>,
     next_client_id: Arc<RwLock<u64>>,
     input_receiver: InputEventReceiver,
-    feedback_stream: FeedbackEventStream,
     led_packet_tx: mpsc::UnboundedSender<ChuniLedDataPacket>,
     atomic_processor: Arc<AtomicInputProcessor>, // For cross-device input atomicity
     last_coin_pulse: bool,                       // Track coin pulse state for edge detection
@@ -174,7 +172,6 @@ impl ChuniioProxyServer {
     pub fn new(
         socket_path: Option<PathBuf>,
         input_stream: InputEventStream,
-        feedback_stream: FeedbackEventStream,
         led_packet_tx: mpsc::UnboundedSender<ChuniLedDataPacket>,
     ) -> Self {
         let socket_path = socket_path.unwrap_or_else(|| {
@@ -194,7 +191,7 @@ impl ChuniioProxyServer {
             protocol_state: Arc::new(RwLock::new(ChuniProtocolState::new())),
             next_client_id: Arc::new(RwLock::new(0)),
             input_receiver: input_stream.subscribe(),
-            feedback_stream,
+
             led_packet_tx,
             atomic_processor: Arc::new(AtomicInputProcessor::new(BatchingConfig::default())),
             last_coin_pulse: false,
@@ -989,12 +986,10 @@ mod tests {
     #[tokio::test]
     async fn test_server_creation() {
         let input_stream = InputEventStream::new();
-        let feedback_stream = FeedbackEventStream::new();
         let (led_packet_tx, _led_packet_rx) = mpsc::unbounded_channel::<ChuniLedDataPacket>();
         let server = ChuniioProxyServer::new(
             Some(PathBuf::from("/tmp/test_chuniio.sock")),
             input_stream,
-            feedback_stream,
             led_packet_tx,
         );
 

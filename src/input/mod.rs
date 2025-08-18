@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod atomic;
 pub mod brokenithm;
 pub mod unix_socket;
+pub mod io_server;
 pub mod web;
 
 /// Represents a packet of input events, sent over a network or any other communication channel.

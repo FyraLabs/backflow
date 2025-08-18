@@ -178,57 +178,7 @@ impl FeedbackEventPacket {
     }
 }
 
-/// Represents a stream of feedback event packets, using tokio mpsc channels for async communication.
-#[derive(Clone)]
-pub struct FeedbackEventStream {
-    /// Sender for feedback event packets.
-    pub tx: tokio::sync::mpsc::UnboundedSender<FeedbackEventPacket>,
-    /// Receiver for feedback event packets.
-    pub rx: std::sync::Arc<
-        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FeedbackEventPacket>>,
-    >,
-}
-
-impl FeedbackEventStream {
-    /// Creates a new `FeedbackEventStream` with a tokio mpsc channel.
-    pub fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel(); // Unbounded for high-frequency feedback
-        Self {
-            tx,
-            rx: std::sync::Arc::new(tokio::sync::Mutex::new(rx)),
-        }
-    }
-
-    /// Sends a feedback event packet through the stream.
-    pub fn send(
-        &self,
-        packet: FeedbackEventPacket,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<FeedbackEventPacket>> {
-        self.tx.send(packet)
-    }
-
-    /// Tries to send a feedback event packet through the stream without blocking.
-    /// For unbounded channels, this is equivalent to send()
-    pub fn try_send(
-        &self,
-        packet: FeedbackEventPacket,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<FeedbackEventPacket>> {
-        self.tx.send(packet)
-    }
-
-    /// Receives a feedback event packet from the stream.
-    /// This is an async method that will await for a packet to be available.
-    pub async fn receive(&self) -> Option<FeedbackEventPacket> {
-        let mut rx = self.rx.lock().await;
-        rx.recv().await
-    }
-}
-
-impl Default for FeedbackEventStream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Legacy FeedbackEventStream has been removed in favor of IoEventServer unified routing.
 
 #[cfg(test)]
 mod tests {
@@ -291,22 +241,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_feedback_event_stream_send_receive() {
-        let stream = FeedbackEventStream::new();
-        let mut packet = FeedbackEventPacket::new("dev".to_string(), 12345);
-        packet.add_event(FeedbackEvent::Led(LedEvent::Set {
-            led_id: 2,
-            on: false,
-            brightness: None,
-            rgb: Some((255, 0, 0)),
-        }));
-
-        stream.send(packet.clone()).unwrap();
-        let received = stream.receive().await.unwrap();
-        assert_eq!(received.device_id, "dev");
-        assert_eq!(received.events.len(), 1);
-    }
+    // Stream test removed; feedback now routed via IoEventServer
 
     #[test]
     fn test_led_event_set_with_rgb() {
