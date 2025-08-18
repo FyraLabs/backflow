@@ -69,7 +69,7 @@ mod tests {
     async fn test_chuniio_keyrelease_events_with_multiple_backends() {
         // Create streams
         let input_stream = InputEventStream::new();
-    let (led_packet_tx, _led_packet_rx) = mpsc::unbounded_channel::<ChuniLedDataPacket>();
+        let (led_packet_tx, _led_packet_rx) = mpsc::unbounded_channel::<ChuniLedDataPacket>();
         let processed_events = Arc::new(Mutex::new(HashMap::<String, u32>::new()));
 
         // Create receivers before starting the backends to ensure they exist when we send events

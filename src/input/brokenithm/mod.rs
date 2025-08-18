@@ -4,14 +4,13 @@
 //!
 //! This module provides a TCP server/client that connects to Brokenithm clients,
 //! allowing them to send input events and receive updates.
-//! 
+//!
 //! NOTE: This module will be deprecated and turned into a separate plugin.
-//! 
+//!
 //! If you want to use a Brokenithm-like frontend on an iOS client, consider
 //! using the Web version, or the new plugin once complete
-//! 
+//!
 //! This backend will be removed once the dedicated plugin is complete.
-
 
 use crate::feedback::{FeedbackEvent, FeedbackEventPacket, LedEvent};
 use crate::input::io_server::IoInboundMessage;

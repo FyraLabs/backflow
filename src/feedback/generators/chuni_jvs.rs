@@ -33,8 +33,8 @@
 //! Keep note that the slider LED indexes are in reverse order, so the first LED is on the right side of the slider,
 
 use crate::config::ChuniIoRgbConfig;
-use crate::input::io_server::{IoEventServer, IoInboundMessage};
 use crate::feedback::{FeedbackEvent, FeedbackEventPacket, LedEvent};
+use crate::input::io_server::{IoEventServer, IoInboundMessage};
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
@@ -485,7 +485,17 @@ pub struct ChuniRgbService {
 
 impl ChuniRgbService {
     /// Create a new CHUNITHM RGB feedback service
-    pub fn new(config: ChuniIoRgbConfig, io_server: std::sync::Arc<IoEventServer>, packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>) -> Self { Self { config, io_server, packet_receiver } }
+    pub fn new(
+        config: ChuniIoRgbConfig,
+        io_server: std::sync::Arc<IoEventServer>,
+        packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
+    ) -> Self {
+        Self {
+            config,
+            io_server,
+            packet_receiver,
+        }
+    }
 
     /// Start the RGB feedback service
     pub async fn run(&mut self) -> eyre::Result<()> {
@@ -546,7 +556,13 @@ impl ChuniRgbService {
 
             // Send feedback packet - use try_send for non-blocking transmission
             // Forward into unified IoEventServer
-            let _ = self.io_server.inbound_sender().send(IoInboundMessage::Feedback { client_id: "chuni_rgb_service".into(), packet: feedback_packet });
+            let _ = self
+                .io_server
+                .inbound_sender()
+                .send(IoInboundMessage::Feedback {
+                    client_id: "chuni_rgb_service".into(),
+                    packet: feedback_packet,
+                });
         }
 
         Ok(())
