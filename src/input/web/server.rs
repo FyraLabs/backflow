@@ -7,7 +7,7 @@ use crate::input::{InputBackend, InputEventPacket};
 use axum::{
     Router,
     extract::{
-        ConnectInfo, State,
+        ConnectInfo, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
@@ -575,20 +575,29 @@ pub mod examples {
 /// Bidirectional WebSocket handler that processes input events from clients
 /// and broadcasts feedback events to all connected clients.
 ///
-/// Supports write-only mode via the `X-Backflow-Write-Only: true` header,
-/// which disables feedback broadcasting to save bandwidth for input-only clients.
+/// Supports write-only mode (disables outbound feedback/input echo) via either:
+/// - HTTP header: `X-Backflow-Write-Only: true`
+/// - Query parameter: `/ws?write_only=true` (also accepts `1`, `yes`)
+///
+/// Header and query parameter are OR'ed; if either indicates truthy, write-only mode is enabled.
 pub async fn bidirectional_ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<WebSocketState>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    // Check if client wants write-only mode (no feedback)
-    let is_write_only = headers
+    // Determine write-only via header OR query param
+    let header_write_only = headers
         .get("X-Backflow-Write-Only")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_lowercase() == "true")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
         .unwrap_or(false);
+    let query_write_only = params
+        .get("write_only")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let is_write_only = header_write_only || query_write_only;
 
     if is_write_only {
         info!(
@@ -613,49 +622,23 @@ async fn handle_websocket_message(
         Ok(Message::Text(text)) => {
             debug!("Received message from {}: {}", addr, text);
 
-            // Control envelope detection (simple JSON with type=control)
-            #[derive(serde::Deserialize)]
-            struct ControlProbe {
-                #[serde(rename = "type")]
-                kind: Option<String>,
-            }
-            if let Ok(probe) = serde_json::from_str::<ControlProbe>(&text) {
-                if matches!(probe.kind.as_deref(), Some("control")) {
-                    #[derive(serde::Deserialize, Debug)]
-                    #[serde(tag = "cmd", rename_all = "snake_case")]
-                    enum ControlCmd {
-                        RegisterStreams { streams: Vec<String> },
-                        ListStreams,
-                    }
-                    #[derive(serde::Deserialize, Debug)]
-                    struct ControlWrapper {
-                        #[serde(rename = "type")]
-                        kind: String,
-                        #[serde(flatten)]
-                        cmd: ControlCmd,
-                    }
-                    if let Ok(wrapper) = serde_json::from_str::<ControlWrapper>(&text) {
-                        use crate::input::io_server::ClientControlMessage;
-                        match wrapper.cmd {
-                            ControlCmd::RegisterStreams { streams } => {
+            // Unified control handling with ClientControlMessage
+            if let Ok(env) = serde_json::from_str::<crate::input::io_server::ControlEnvelope>(&text) {
+                if env.kind == "control" {
+                    use crate::input::io_server::ClientControlMessage;
+                    if let Ok(ctrl) = serde_json::from_value::<ClientControlMessage>(env.inner) {
+                        match &ctrl {
+                            ClientControlMessage::UpdateStreamRegistration { .. } => {
                                 if let Err(e) =
                                     io_server.inbound_sender().send(IoInboundMessage::Control {
                                         client_id: addr.to_string(),
-                                        msg: ClientControlMessage::UpdateStreamRegistration(
-                                            streams.clone(),
-                                        ),
+                                        msg: ctrl.clone(),
                                     })
                                 {
                                     error!("Failed to send control msg: {e}");
                                 }
-                                // Echo ack
-                                let ack = serde_json::json!({"type":"control_ack","registered_streams": streams});
-                                if let Ok(json) = serde_json::to_string(&ack) {
-                                    let mut g = sender.lock().await;
-                                    let _ = g.send(Message::Text(json.into())).await;
-                                }
                             }
-                            ControlCmd::ListStreams => {
+                            ClientControlMessage::ListStreams => {
                                 let streams = io_server.list_stream_ids().await;
                                 let resp = serde_json::json!({"type":"streams","streams": streams});
                                 if let Ok(json) = serde_json::to_string(&resp) {
@@ -663,7 +646,25 @@ async fn handle_websocket_message(
                                     let _ = g.send(Message::Text(json.into())).await;
                                 }
                             }
+                            _ => {
+                                // Forward other control mutations (filters, stop, etc.)
+                                if let Err(e) =
+                                    io_server.inbound_sender().send(IoInboundMessage::Control {
+                                        client_id: addr.to_string(),
+                                        msg: ctrl.clone(),
+                                    })
+                                {
+                                    error!("Failed to send control msg: {e}");
+                                }
+                            }
                         }
+                        return false;
+                    } else {
+                        // invalid control contents
+                        io_server.send_app_error(
+                            &addr.to_string(),
+                            crate::error::AppError::Parse("Failed to parse control command".into()),
+                        );
                         return false;
                     }
                 }
@@ -737,45 +738,8 @@ async fn handle_websocket_message(
     }
 }
 
-/// Handles a single feedback packet to a WebSocket client. Returns true if the connection should break/close.
-#[tracing::instrument(skip_all, fields(feedback_packet))]
-async fn handle_feedback_packet_to_client(
-    feedback_packet: &FeedbackEventPacket,
-    sender: &Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>,
-    addr: SocketAddr,
-) -> bool {
-    let start_time = std::time::Instant::now();
-    trace!(
-        target: crate::PACKET_PROCESSING_TARGET,
-        events = feedback_packet.events.len(),
-        device_id = feedback_packet.device_id,
-        "Sending feedback packet to {addr}",
-    );
-
-    match serde_json::to_string(feedback_packet) {
-        Ok(json) => {
-            let mut sender_guard = sender.lock().await;
-            if let Err(e) = sender_guard.send(Message::Text(json.into())).await {
-                warn!("Failed to send feedback to {}: {}", addr, e);
-                return true;
-            }
-            // Explicitly flush the WebSocket to ensure immediate sending
-            if let Err(e) = sender_guard.flush().await {
-                warn!("Failed to flush WebSocket for {}: {}", addr, e);
-                return true;
-            }
-
-            let elapsed = start_time.elapsed();
-            if elapsed.as_millis() > 5 {
-                debug!("Slow WebSocket send to {}: {}ms", addr, elapsed.as_millis());
-            }
-        }
-        Err(e) => {
-            error!("Failed to serialize feedback packet for {}: {}", addr, e);
-        }
-    }
-    false
-}
+// Previous specialized feedback send helper removed; we now serialize full IoClientMessage
+// variants (including Feedback, Input, Error, ControlAck) for consistency with unix/stdio backends.
 
 /// Handles a single WebSocket connection for bidirectional communication.
 /// If `is_write_only` is true, the client will not receive feedback events.
@@ -794,7 +758,7 @@ async fn handle_socket(
     let sender = Arc::new(tokio::sync::Mutex::new(sender));
 
     // If unified IO server present, register this client to receive unified feedback/errors
-    let mut unified_feedback_rx = state
+    let unified_feedback_rx = state
         .io_server
         .register_client(ClientNode {
             id: addr.to_string(),
@@ -826,31 +790,31 @@ async fn handle_socket(
         tokio::spawn(handle_web_socket_messages)
     };
 
-    // Task to handle outgoing messages: unified path preferred, else legacy feedback stream
+    // Task to handle outgoing messages: serialize full IoClientMessage enum so clients get a
+    // discriminated union (matches unix/stdio backend behavior). This includes Input packets
+    // routed by stream registration or device filters – previously these were dropped.
     let output_task = if is_write_only {
         None
     } else {
         let sender = sender.clone();
         let mut rx = unified_feedback_rx;
         Some(tokio::spawn(async move {
-            use crate::input::io_server::IoClientMessage;
             while let Some(msg) = rx.recv().await {
-                match msg {
-                    IoClientMessage::Feedback(pkt) => {
-                        if handle_feedback_packet_to_client(&pkt, &sender, addr).await {
+                // Serialize the whole enum so JSON shape is {"type":..,"data":..}
+                // This unifies WebSocket transport with unix/stdio backends.
+                match serde_json::to_string(&msg) {
+                    Ok(json) => {
+                        let mut guard = sender.lock().await;
+                        if guard.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                        // Best-effort flush (not required but keeps latency low)
+                        if guard.flush().await.is_err() {
                             break;
                         }
                     }
-                    IoClientMessage::Input(_pkt) => {
-                        // For now, ignore input echo to web clients (could be forwarded later)
-                    }
-                    IoClientMessage::Error(err) => {
-                        if let Ok(json) = serde_json::to_string(&err) {
-                            let mut guard = sender.lock().await;
-                            if guard.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
-                        }
+                    Err(e) => {
+                        error!("Failed to serialize IoClientMessage for {}: {}", addr, e);
                     }
                 }
             }

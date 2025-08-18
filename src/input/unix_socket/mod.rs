@@ -43,49 +43,46 @@ impl UnixSocketServer {
         let _phantom_use: Option<IoClientMessage> = None; // keep type imported (avoid unused warning)
         let inbound_tx = io_server.inbound_sender();
 
-        // Task to handle incoming messages (input/feedback from client)
+        // Task to handle incoming messages (input/feedback/control from client)
         let input_task = tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {
-                // Attempt control message parsing first (support camelCase and snake_case command names)
-                #[derive(serde::Deserialize)]
-                struct ControlProbe {
-                    #[serde(rename = "type")]
-                    kind: Option<String>,
-                    cmd: Option<String>,
+                let line_trimmed = line.trim();
+                if line_trimmed.is_empty() {
+                    continue;
                 }
-                if let Ok(probe) = serde_json::from_str::<ControlProbe>(&line) {
-                    if matches!(probe.kind.as_deref(), Some("control")) {
+                // Unified control handling: attempt to parse {"type":"control", ...}
+                if let Ok(env) =
+                    serde_json::from_str::<crate::input::io_server::ControlEnvelope>(line_trimmed)
+                {
+                    if env.kind == "control" {
                         use crate::input::io_server::ClientControlMessage;
-                        // Accept both `devices` and `device_ids` arrays
-                        #[derive(serde::Deserialize)]
-                        struct InputDidFilterPayload {
-                            #[serde(default, alias = "devices", alias = "device_ids")]
-                            pub devices: Vec<String>,
-                        }
-                        match probe.cmd.as_deref() {
-                            Some("UpdateInputDIDFilter") | Some("update_input_did_filter") => {
-                                if let Ok(payload) =
-                                    serde_json::from_str::<InputDidFilterPayload>(&line)
-                                {
+                        if let Ok(ctrl) = serde_json::from_value::<ClientControlMessage>(env.inner)
+                        {
+                            match ctrl {
+                                ClientControlMessage::ListStreams => {
+                                    // Transport-level response
+                                    let streams = io_server.list_stream_ids().await;
+                                    let _resp =
+                                        serde_json::json!({"type":"streams","streams":streams});
+                                    // We don't echo on unix socket currently (no writer handle here) -> could add ack path
+                                    // For now just ignore; clients using unix socket can rely on future ack implementation.
+                                }
+                                other => {
                                     let _ = inbound_tx.send(IoInboundMessage::Control {
                                         client_id: client_id.clone(),
-                                        msg: ClientControlMessage::UpdateInputDIDFilter(
-                                            payload.devices.clone(),
-                                        ),
+                                        msg: other,
                                     });
-                                    // Ack
-                                    // TODO: optional: write ack back on this control channel for UNIX socket clients
-                                } else {
-                                    io_server.send_error(
-                                        &client_id,
-                                        "invalid_control",
-                                        "Failed parsing UpdateInputDIDFilter payload",
-                                        Some(line.clone()),
-                                    );
                                 }
-                                continue;
                             }
-                            _ => { /* unknown control cmd; fall through to other parsing */ }
+                            continue;
+                        } else {
+                            io_server.send_app_error(
+                                &client_id,
+                                crate::error::AppError::Parse(
+                                    "Failed to parse control command".into(),
+                                ),
+                            );
+                            continue;
                         }
                     }
                 }
@@ -117,13 +114,10 @@ impl UnixSocketServer {
                         error!("Failed to forward feedback to IoEventServer: {}", e);
                     }
                 } else {
-                    warn!("Failed to parse message from unix socket (neither input nor feedback)");
-                    io_server.send_error(
-                        &client_id,
-                        "invalid_message",
-                        "Message was not a valid InputEventPacket or FeedbackEventPacket",
-                        Some(line.clone()),
+                    warn!(
+                        "Failed to parse message from unix socket (neither input, feedback, nor control)"
                     );
+                    io_server.send_app_error(&client_id, crate::error::AppError::Parse("Message was not a valid InputEventPacket, FeedbackEventPacket, or control envelope".into()));
                 }
             }
             debug!("UNIX socket client input task finished");

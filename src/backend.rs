@@ -292,6 +292,83 @@ impl Backend {
 
     /// Start input services based on configuration
     fn start_input_services(&mut self) {
+        // Spawn plugin processes (each with its own stdio transport) if configured
+        if !self.config.plugins.is_empty() {
+            let plugins = self.config.plugins.clone();
+            for (idx, plugin) in plugins.into_iter().enumerate() {
+                let io_server = self.io_server.clone();
+                let command = plugin.command.clone();
+                let args = plugin.args.clone();
+                let client_id = format!(
+                    "plugin:{idx}:{}",
+                    std::path::Path::new(&command)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                );
+                self.spawn_service(&format!("plugin_stdio:{client_id}"), async move {
+                    use tokio::process::Command;
+                    use tracing::{error, info, warn};
+                    info!(%command, ?args, %client_id, "Spawning plugin process (stdio backend)");
+                    let mut child = match Command::new(&command)
+                        .args(&args)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(%command, error=%e, "Failed to spawn plugin process");
+                            return;
+                        }
+                    };
+                    let stdout = match child.stdout.take() {
+                        Some(s) => s,
+                        None => {
+                            error!(%command, "Plugin stdout unavailable");
+                            return;
+                        }
+                    };
+                    let stdin = match child.stdin.take() {
+                        Some(s) => s,
+                        None => {
+                            error!(%command, "Plugin stdin unavailable");
+                            return;
+                        }
+                    };
+                    // stderr -> log lines
+                    if let Some(stderr) = child.stderr.take() {
+                        let cid = client_id.clone();
+                        tokio::spawn(async move {
+                            use tokio::io::{AsyncBufReadExt, BufReader};
+                            let mut lines = BufReader::new(stderr).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                if line.trim().is_empty() {
+                                    continue;
+                                }
+                                warn!(%cid, "[plugin stderr] {line}");
+                            }
+                        });
+                    }
+                    // Run stdio backend for this plugin
+                    let mut backend = crate::input::stdio::StdioBackend::with_streams(
+                        client_id.clone(),
+                        stdout,
+                        stdin,
+                        io_server.clone(),
+                    );
+                    if let Err(e) = backend.run().await {
+                        error!(%client_id, error=%e, "Plugin stdio backend error");
+                    }
+                    match child.wait().await {
+                        Ok(status) => info!(%client_id, ?status, "Plugin process exited"),
+                        Err(e) => error!(%client_id, error=%e, "Failed waiting for plugin exit"),
+                    }
+                });
+            }
+        }
+
         // Start web input backend if configured and enabled
         if let Some(web_config) = &self.config.input.web {
             if web_config.enabled {

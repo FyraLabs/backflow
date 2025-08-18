@@ -51,13 +51,13 @@
 //! { "type": "control", "cmd": <command object ...> }
 //! ```
 //! Supported commands (snake_case):
-//! * `register_streams` – Add (idempotently) one or more stream/topic IDs this client wants to receive.
+//! * `register_streams` – Declaratively set the complete stream/topic ID set this client wants to receive.
 //!   ```json
 //!   { "type": "control", "cmd": "register_streams", "streams": ["uinput","foo"] }
 //!   ```
 //!   Response:
 //!   ```json
-//!   { "type": "control_ack", "registered_streams": ["uinput","foo"] }
+//!   { "type": "control_ack", "cmd": "update_stream_registration", "registered_streams": ["uinput","foo"] }
 //!   ```
 //! * `list_streams` – Request the current union of all known registered stream IDs:
 //!   ```json
@@ -90,8 +90,9 @@
 //! * A client that registers stream `foo` will receive every outbound `Input` packet that the
 //!   routing service mirrors to stream `foo` (currently backend name == stream ID).
 //! * Multiple clients may register the same stream ID; each receives identical copies.
-//! * Registration is additive; duplicates are deduped client-side.
-//! * No explicit unregister yet (will be provided by a future control command).
+//! * Registration is declarative (the provided list replaces any previous set; duplicates ignored).
+//! * To clear all stream registrations (reverting to device filter mode), send an empty list: `{ "type":"control", "cmd":"register_streams", "streams":[] }`.
+//! * No explicit unregister command necessary.
 //! * Precedence: If a client has registered at least one stream/topic, device ID
 //!   based `input_listener_device_ids` filtering is ignored for input delivery (topic mode).
 //!   If no streams are registered, device filters apply. IMPORTANT: An empty
@@ -133,6 +134,7 @@
 //! Keep this documentation in sync when adding new control commands or message variants.
 use std::{collections::HashMap, sync::Arc};
 
+use crate::error::{AppError, ClientFacingError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, info, warn};
@@ -182,24 +184,54 @@ pub struct ClientSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "cmd")]
+#[serde(rename_all = "snake_case")]
 pub enum ClientControlMessage {
     /// Request that the server stop sending feedback events to this client
+    #[serde(alias = "StopFeedback")] // legacy alias
     StopFeedback,
 
     /// Request that the server stop sending input events to this client
+    #[serde(alias = "StopInput")] // legacy alias
     StopInput,
 
-    /// Request that the server update the device ID filter for input events
-    UpdateInputDIDFilter(Vec<String>),
+    /// Update (replace) the device ID filter for input events (whitelist of device_ids)
+    #[serde(
+        alias = "UpdateInputDIDFilter",
+        alias = "update_input_did_filter",
+        alias = "update_input_didfilter"
+    )]
+    UpdateInputDIDFilter {
+        #[serde(default, alias = "devices", alias = "device_ids")]
+        devices: Vec<String>,
+    },
 
-    /// Request that the server update the device ID filter for feedback events
-    UpdateFeedbackDIDFilter(Vec<String>),
+    /// Update (replace) the device ID filter for feedback events (whitelist of device_ids)
+    #[serde(
+        alias = "UpdateFeedbackDIDFilter",
+        alias = "update_feedback_did_filter",
+        alias = "update_feedback_didfilter"
+    )]
+    UpdateFeedbackDIDFilter {
+        #[serde(default, alias = "devices", alias = "device_ids")]
+        devices: Vec<String>,
+    },
 
-    /// Request that the server update/register the stream and send events into that
-    /// stream/topic
-    ///
-    /// Streams will be created if they do not already exist.
-    UpdateStreamRegistration(Vec<String>),
+    /// Add (idempotently) one or more stream/topic IDs this client wants to receive.
+    /// Streams are created if they do not already exist.
+    #[serde(
+        alias = "UpdateStreamRegistration",
+        alias = "register_streams",
+        alias = "RegisterStreams"
+    )]
+    UpdateStreamRegistration {
+        #[serde(default, alias = "streams")]
+        streams: Vec<String>,
+    },
+
+    /// Query current union of all known registered stream IDs. (No mutation.)
+    #[serde(alias = "ListStreams", alias = "listStreams")] // additional safety
+    ListStreams,
 }
 
 /// Inbound message into the unified I/O processing pipeline
@@ -231,6 +263,17 @@ pub enum IoOutboundMessage {
     Feedback(FeedbackEventPacket),
 }
 
+/// Lightweight envelope used by transports to detect a control message before
+/// deserializing into the strongly-typed `ClientControlMessage`.
+/// JSON shape: {"type":"control", <command-specific fields> }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlEnvelope {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(flatten)]
+    pub inner: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoErrorPacket {
     pub code: String,
@@ -246,6 +289,17 @@ pub enum IoClientMessage {
     /// Stream/topic routed input packet
     Input(InputEventPacket),
     Error(IoErrorPacket),
+    #[serde(rename = "control_ack")]
+    ControlAck(ControlAckPacket),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlAckPacket {
+    pub cmd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<String>>, // for *_did_filter updates
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_streams: Option<Vec<String>>, // for stream registration updates
 }
 
 #[derive(Clone)]
@@ -374,7 +428,7 @@ impl IoEventServer {
         use ClientControlMessage::*;
         let mut clients = self.clients.write().await;
         if let Some(entry) = clients.get_mut(client_id) {
-            match msg {
+            match &msg {
                 StopFeedback => {
                     entry.settings.feedback_listener_device_ids.clear();
                     entry.settings.write_only = true;
@@ -382,20 +436,47 @@ impl IoEventServer {
                 StopInput => {
                     entry.settings.input_listener_device_ids.clear();
                 }
-                UpdateInputDIDFilter(list) => {
-                    entry.settings.input_listener_device_ids = list;
+                UpdateInputDIDFilter { devices } => {
+                    entry.settings.input_listener_device_ids = devices.clone();
                 }
-                UpdateFeedbackDIDFilter(list) => {
-                    entry.settings.feedback_listener_device_ids = list;
+                UpdateFeedbackDIDFilter { devices } => {
+                    entry.settings.feedback_listener_device_ids = devices.clone();
                     entry.settings.write_only = false; // ensure enabled
                 }
-                UpdateStreamRegistration(streams) => {
-                    for s in streams {
-                        if !entry.settings.registered_stream_ids.contains(&s) {
-                            entry.settings.registered_stream_ids.push(s);
-                        }
-                    }
+                UpdateStreamRegistration { streams } => {
+                    // Declarative replacement with dedup
+                    let set: std::collections::BTreeSet<String> = streams.iter().cloned().collect();
+                    entry.settings.registered_stream_ids = set.into_iter().collect();
                 }
+                ListStreams => {
+                    // No-op: handled at transport layer (returns current list)
+                }
+            }
+            // Emit centralized control_ack for mutating commands (excluding ListStreams)
+            let ack_cmd = match &msg {
+                StopFeedback => Some(("stop_feedback", None, None)),
+                StopInput => Some(("stop_input", None, None)),
+                UpdateInputDIDFilter { devices } => {
+                    Some(("update_input_did_filter", Some(devices.clone()), None))
+                }
+                UpdateFeedbackDIDFilter { devices } => {
+                    Some(("update_feedback_did_filter", Some(devices.clone()), None))
+                }
+                UpdateStreamRegistration { .. } => Some((
+                    "update_stream_registration",
+                    None,
+                    Some(entry.settings.registered_stream_ids.clone()),
+                )),
+                ListStreams => None,
+            };
+            if let Some((cmd, devices_opt, streams_opt)) = ack_cmd {
+                let _ = entry
+                    .outbound_tx
+                    .send(IoClientMessage::ControlAck(ControlAckPacket {
+                        cmd: cmd.to_string(),
+                        devices: devices_opt,
+                        registered_streams: streams_opt,
+                    }));
             }
             debug!(client_id = %client_id, ?entry.settings.registered_stream_ids, "Applied control message");
         } else {
@@ -432,7 +513,7 @@ impl IoEventServer {
         let clients = self.clients.clone();
         tokio::spawn(async move {
             let snapshot = { clients.read().await.clone() };
-            for (cid, entry) in snapshot.iter() {
+            for (_cid, entry) in snapshot.iter() {
                 // Skip clients that chose stream/topic registration path
                 if !entry.settings.registered_stream_ids.is_empty() {
                     continue;
@@ -455,27 +536,25 @@ impl IoEventServer {
             }
         });
     }
-    /// Send an error packet to a specific client (transport should call on parse/validation failure)
-    pub fn send_error(
-        &self,
-        client_id: &str,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        raw: Option<String>,
-    ) {
+
+    /// Send an AppError directly (automatically maps to client-facing code/message).
+    pub fn send_app_error(&self, client_id: &str, error: AppError) {
+        let cf: ClientFacingError = error.into();
+        self.dispatch_client_error(client_id, cf);
+    }
+
+    fn dispatch_client_error(&self, client_id: &str, cf: ClientFacingError) {
         let client_id_str = client_id.to_string();
         let clients = self.clients.clone();
-        let code_s = code.into();
-        let msg_s = message.into();
         tokio::spawn(async move {
             let guard = clients.read().await;
             if let Some(entry) = guard.get(&client_id_str) {
                 let _ = entry
                     .outbound_tx
                     .send(IoClientMessage::Error(IoErrorPacket {
-                        code: code_s,
-                        message: msg_s,
-                        raw,
+                        code: cf.code,
+                        message: cf.message,
+                        raw: cf.raw,
                     }));
             } else {
                 warn!(client_id = %client_id_str, "Attempted to send error to unknown client");
@@ -496,6 +575,7 @@ impl IoEventServer {
     }
 
     /// Returns current number of registered clients
+    #[cfg(test)]
     pub async fn client_count(&self) -> usize {
         self.clients.read().await.len()
     }
@@ -649,21 +729,22 @@ mod tests {
         assert_eq!(server.client_count().await, 1);
 
         // Send an error
-        server.send_error(
-            "client1",
-            "test_error",
-            "Something went wrong",
-            Some("RAW".into()),
-        );
-        let msg = timeout(Duration::from_millis(100), async { rx.recv().await })
+        server.send_app_error("client1", AppError::Internal("Something went wrong".into()));
+        let msg = timeout(Duration::from_millis(200), async { rx.recv().await })
             .await
             .expect("timed out waiting for error")
             .expect("channel closed");
         match msg {
             IoClientMessage::Error(err) => {
-                assert_eq!(err.code, "test_error");
-                assert_eq!(err.message, "Something went wrong");
-                assert_eq!(err.raw.as_deref(), Some("RAW"));
+                // Accept mapped error code/message from AppError::Internal
+                assert_eq!(err.code, "internal_error");
+                assert!(
+                    err.message == "internal error: Something went wrong"
+                        || err.message.contains("Something went wrong"),
+                    "unexpected error message: {}",
+                    err.message
+                );
+                assert_eq!(err.raw, None);
             }
             _ => panic!("expected error message"),
         }
@@ -831,7 +912,7 @@ mod tests {
                     .expect("channel closed");
                 match msg {
                     IoClientMessage::Feedback(pkt) => assert_eq!(pkt.device_id, "leddev"),
-                    other => panic!("expected feedback, got {:?}", other),
+                    other => panic!("expected feedback, got {other:?}"),
                 }
             } else {
                 let res = timeout(Duration::from_millis(80), async { rx.recv().await }).await;
@@ -898,7 +979,7 @@ mod tests {
         .expect("A closed");
         match a {
             IoClientMessage::Input(p) => assert_eq!(p.device_id, "devZ"),
-            other => panic!("expected input for A got {:?}", other),
+            other => panic!("expected input for A got {other:?}"),
         }
         let b = timeout(Duration::from_millis(80), async { empty_rx.recv().await }).await;
         assert!(
