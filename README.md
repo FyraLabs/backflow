@@ -4,7 +4,7 @@
 >
 > Remap and route input from any device — adaptive controllers, arcade boards, or DIY hardware — with no kernel drivers, no lock-in.
 
-**Backflow** is a daemon that bridges unconventional input devices to standard HID events, powered by [InputPlumber](https://github.com/ShadowBlip/InputPlumber). Whether you're using analog controls, serial interfaces, web-based gamepads, MIDI devices, or other custom hardware, Backflow provides a modular way to route and remap any input into standard keyboard, mouse, or gamepad events.
+**Backflow** is an input router and message broker that bridges unconventional input devices to standard HID events, powered by [InputPlumber](https://github.com/ShadowBlip/InputPlumber). Whether you're using analog controls, serial interfaces, web-based gamepads, MIDI devices, or other custom hardware, Backflow provides a modular way to route and remap any input into standard keyboard, mouse, or gamepad events.
 
 Whether you're building a virtual gamepad in a browser, integrating RS232 or MIDI devices, or enabling hands-free control through custom hardware, Backflow helps unify everything into one virtual input stack.
 

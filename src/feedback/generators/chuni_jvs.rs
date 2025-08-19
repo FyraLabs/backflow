@@ -34,6 +34,7 @@
 
 use crate::config::ChuniIoRgbConfig;
 use crate::feedback::{FeedbackEvent, FeedbackEventPacket, LedEvent};
+use crate::input::io_server::{IoEventServer, IoInboundMessage};
 use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
@@ -468,17 +469,17 @@ impl Default for ChuniLedParser {
 /// Create and run a CHUNITHM RGB lightsync service
 pub async fn run_chuniio_service(
     config: ChuniIoRgbConfig,
-    feedback_stream: crate::feedback::FeedbackEventStream,
+    io_server: std::sync::Arc<IoEventServer>,
     packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
 ) -> eyre::Result<()> {
-    let mut service = ChuniRgbService::new(config, feedback_stream, packet_receiver);
+    let mut service = ChuniRgbService::new(config, io_server, packet_receiver);
     service.run().await
 }
 /// CHUNITHM RGB feedback service that listens on a Unix domain socket
 /// and processes JVS-like LED data packets
 pub struct ChuniRgbService {
     config: ChuniIoRgbConfig,
-    feedback_stream: crate::feedback::FeedbackEventStream,
+    io_server: std::sync::Arc<IoEventServer>,
     packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
 }
 
@@ -486,12 +487,12 @@ impl ChuniRgbService {
     /// Create a new CHUNITHM RGB feedback service
     pub fn new(
         config: ChuniIoRgbConfig,
-        feedback_stream: crate::feedback::FeedbackEventStream,
+        io_server: std::sync::Arc<IoEventServer>,
         packet_receiver: mpsc::UnboundedReceiver<ChuniLedDataPacket>,
     ) -> Self {
         Self {
             config,
-            feedback_stream,
+            io_server,
             packet_receiver,
         }
     }
@@ -554,9 +555,14 @@ impl ChuniRgbService {
             };
 
             // Send feedback packet - use try_send for non-blocking transmission
-            if let Err(e) = self.feedback_stream.try_send(feedback_packet) {
-                warn!("Failed to send feedback packet: {}", e);
-            }
+            // Forward into unified IoEventServer
+            let _ = self
+                .io_server
+                .inbound_sender()
+                .send(IoInboundMessage::Feedback {
+                    client_id: "chuni_rgb_service".into(),
+                    packet: feedback_packet,
+                });
         }
 
         Ok(())
