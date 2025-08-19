@@ -228,7 +228,7 @@ impl Backend {
         let device_filter = DeviceFilter::new(&config);
         let event_router = EventRouter::new();
 
-        let io_server = Arc::new(IoEventServer::new());
+        let io_server = Arc::new(IoEventServer::with_config(Arc::new(config.clone())));
         // Spawn unified IO server processing loop now (bridged below)
         let io_server_clone = io_server.clone();
         tokio::spawn(async move {

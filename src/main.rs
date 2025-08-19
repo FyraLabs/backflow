@@ -1,11 +1,11 @@
 mod backend;
 mod config;
 mod device_filter;
+mod error;
 mod feedback;
 mod input;
 mod output;
 mod protos;
-mod error;
 use eyre::Result;
 use tracing_subscriber::{Layer, layer::SubscriberExt};
 

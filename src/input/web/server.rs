@@ -623,7 +623,8 @@ async fn handle_websocket_message(
             debug!("Received message from {}: {}", addr, text);
 
             // Unified control handling with ClientControlMessage
-            if let Ok(env) = serde_json::from_str::<crate::input::io_server::ControlEnvelope>(&text) {
+            if let Ok(env) = serde_json::from_str::<crate::input::io_server::ControlEnvelope>(&text)
+            {
                 if env.kind == "control" {
                     use crate::input::io_server::ClientControlMessage;
                     if let Ok(ctrl) = serde_json::from_value::<ClientControlMessage>(env.inner) {

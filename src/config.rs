@@ -4,8 +4,9 @@ use crate::device_filter::KeyExpr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use toml::Value;
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct AppConfig {
     #[serde(default)]
     pub input: InputConfig,
@@ -55,6 +56,10 @@ pub struct AppConfig {
     /// - Graceful shutdown signals
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+
+    /// Global Plugin config, not used by Backflow itself
+    #[serde(default)]
+    pub plugin_settings: HashMap<String, Value>,
 }
 
 /// Configuration for a single plugin process.
@@ -186,7 +191,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct InputConfig {
     #[serde(default = "default_web_enabled")]
     pub web: Option<WebBackend>,
@@ -212,7 +217,7 @@ fn default_web_enabled() -> Option<WebBackend> {
     Some(WebBackend::default())
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct OutputConfig {
     #[serde(default)]
     pub uinput: UInputConfig,
@@ -220,7 +225,7 @@ pub struct OutputConfig {
     pub chuniio_proxy: Option<ChuniioProxyConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct UnixDomainSocketConfig {
     #[serde(default = "default_unix_socket_path")]
     pub path: PathBuf,
@@ -241,7 +246,7 @@ fn default_unix_socket_path() -> PathBuf {
 }
 
 // set web.enabled = false in [input.web] to explicitly disable the web backend
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WebBackend {
     #[serde(default = "default_web_enabled_bool")]
     pub enabled: bool,
@@ -273,7 +278,7 @@ fn default_web_host() -> String {
     "0.0.0.0".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UInputConfig {
     pub enabled: bool,
 }
@@ -284,7 +289,7 @@ impl Default for UInputConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct FeedbackConfig {
     // CHUNIIO RGB feedback socket
     pub chuniio: Option<ChuniIoRgbConfig>,
@@ -417,7 +422,7 @@ impl Default for DeviceConfig {
         }
     }
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChuniioProxyConfig {
     #[serde(default = "default_chuniio_proxy_enabled")]
     pub enabled: bool,
@@ -455,7 +460,7 @@ fn default_chuniio_proxy_socket_path() -> PathBuf {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmUdpConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,
@@ -475,7 +480,7 @@ fn default_brokenithm_host() -> String {
     "0.0.0.0".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmIdeviceConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,
@@ -487,7 +492,7 @@ pub struct BrokenithmIdeviceConfig {
     pub udid: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,

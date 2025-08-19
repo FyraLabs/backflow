@@ -232,6 +232,9 @@ pub enum ClientControlMessage {
     /// Query current union of all known registered stream IDs. (No mutation.)
     #[serde(alias = "ListStreams", alias = "listStreams")] // additional safety
     ListStreams,
+
+    #[serde(alias = "GetConfig", alias = "get_config", alias = "getConfig")]
+    GetConfig,
 }
 
 /// Inbound message into the unified I/O processing pipeline
@@ -282,15 +285,57 @@ pub struct IoErrorPacket {
     pub raw: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")] // explicit tagging for clearer JSON
+#[derive(Debug, Clone)]
+/// Outbound messages to clients. NOTE: Serialization behavior:
+/// - Feedback: serialized as the raw `FeedbackEventPacket` (backwards compatibility with
+///   pre-unified format; no {"type":"Feedback","data":...} wrapper)
+/// - Other variants (Input, Error, ControlAck): serialized as
+///   {"type": <Variant>, "data": <payload>} matching the previous tagged format.
 pub enum IoClientMessage {
     Feedback(FeedbackEventPacket),
     /// Stream/topic routed input packet
     Input(InputEventPacket),
     Error(IoErrorPacket),
-    #[serde(rename = "control_ack")]
     ControlAck(ControlAckPacket),
+    /// Full configuration snapshot (response to GetConfig control)
+    Config(Box<crate::config::AppConfig>),
+}
+
+impl serde::Serialize for IoClientMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            // Raw packet (legacy shape expected by existing clients)
+            IoClientMessage::Feedback(pkt) => pkt.serialize(serializer),
+            IoClientMessage::Input(pkt) => {
+                let mut st = serializer.serialize_struct("IoClientMessage", 2)?;
+                st.serialize_field("type", "Input")?;
+                st.serialize_field("data", pkt)?;
+                st.end()
+            }
+            IoClientMessage::Error(err) => {
+                let mut st = serializer.serialize_struct("IoClientMessage", 2)?;
+                st.serialize_field("type", "Error")?;
+                st.serialize_field("data", err)?;
+                st.end()
+            }
+            IoClientMessage::ControlAck(ack) => {
+                let mut st = serializer.serialize_struct("IoClientMessage", 2)?;
+                st.serialize_field("type", "control_ack")?; // keep snake_case naming
+                st.serialize_field("data", ack)?;
+                st.end()
+            }
+            IoClientMessage::Config(cfg) => {
+                let mut st = serializer.serialize_struct("IoClientMessage", 2)?;
+                st.serialize_field("type", "config")?;
+                st.serialize_field("data", cfg)?;
+                st.end()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +362,7 @@ pub struct IoEventServer {
     outbound_tx: mpsc::UnboundedSender<IoOutboundMessage>,
     outbound_rx: Arc<Mutex<mpsc::UnboundedReceiver<IoOutboundMessage>>>,
     clients: Arc<RwLock<HashMap<String, ClientEntry>>>,
+    app_config: Arc<crate::config::AppConfig>,
 }
 
 impl IoEventServer {
@@ -331,7 +377,15 @@ impl IoEventServer {
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             clients: Arc::new(RwLock::new(HashMap::new())),
+            app_config: Arc::new(Default::default()),
         }
+    }
+
+    /// Create with explicit config (used by backend)
+    pub fn with_config(cfg: Arc<crate::config::AppConfig>) -> Self {
+        let mut s = Self::new();
+        s.app_config = cfg;
+        s
     }
 
     /// Get a clone of the inbound sender so transport backends can submit messages
@@ -451,6 +505,11 @@ impl IoEventServer {
                 ListStreams => {
                     // No-op: handled at transport layer (returns current list)
                 }
+                ClientControlMessage::GetConfig => {
+                    // Non-mutating: send config snapshot
+                    let cfg = (*self.app_config).clone();
+                    let _ = entry.outbound_tx.send(IoClientMessage::Config(Box::new(cfg)));
+                }
             }
             // Emit centralized control_ack for mutating commands (excluding ListStreams)
             let ack_cmd = match &msg {
@@ -468,6 +527,7 @@ impl IoEventServer {
                     Some(entry.settings.registered_stream_ids.clone()),
                 )),
                 ListStreams => None,
+                ClientControlMessage::GetConfig => None,
             };
             if let Some((cmd, devices_opt, streams_opt)) = ack_cmd {
                 let _ = entry
@@ -1044,5 +1104,44 @@ mod tests {
         // Default client should not
         let res = timeout(Duration::from_millis(80), async { default_rx.recv().await }).await;
         assert!(res.is_err(), "default client received input without opt-in");
+    }
+
+    #[tokio::test]
+    async fn test_get_config_control_message() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.output.uinput.enabled = false; // mutate something observable
+        let server = Arc::new(IoEventServer::with_config(Arc::new(cfg.clone())));
+        let run_server = server.clone();
+        tokio::spawn(async move {
+            let _ = run_server.run_forever().await;
+        });
+
+        let mut rx = server
+            .register_client(ClientNode {
+                id: "client_cfg".into(),
+                client_settings: ClientSettings::default(),
+            })
+            .await;
+
+        // Send GetConfig control message
+        server
+            .inbound_sender()
+            .send(IoInboundMessage::Control {
+                client_id: "client_cfg".into(),
+                msg: ClientControlMessage::GetConfig,
+            })
+            .unwrap();
+
+        use tokio::time::{Duration, timeout};
+        let msg = timeout(Duration::from_millis(200), async { rx.recv().await })
+            .await
+            .expect("timeout waiting for config")
+            .expect("channel closed");
+        match msg {
+            IoClientMessage::Config(received) => {
+                assert_eq!(received.output.uinput.enabled, false);
+            }
+            other => panic!("expected Config message, got {other:?}"),
+        }
     }
 }
