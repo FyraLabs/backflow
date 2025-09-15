@@ -1,0 +1,50 @@
+name: Build release artifacts
+permissions:
+    contents: read
+    packages: write
+
+on:
+    workflow_call:
+        inputs:
+            tag:
+                description: 'The tag for this binary, i.e. "v1.2.3" or "git-<sha>"'
+                type: string
+                required: true
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        container:
+            image: ghcr.io/terrapkg/builder:f42
+        steps:
+            - name: Install dependencies
+              run: |
+                  dnf install -y clang-devel gcc mold cmake pkg-config libevdev-devel libudev-devel dbus-devel
+            - uses: actions/checkout@v5
+            - name: Set up Rust
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  override: true
+                  cache: true
+                  rustflags: ""
+
+            - name: Build release binaries
+              run: |
+                  cargo build --release
+
+            - name: Set up artifacts
+              run: |
+                  outdir=out/backflow-${{ inputs.tag }}-${{ runner.arch }}
+                  mkdir -p $outdir
+                  cp target/release/backflow $outdir/
+                  cp -a web/ $outdir/web
+                  tar czf backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz -C out backflow-${{ inputs.tag }}-${{ runner.arch }}
+
+            - name: Upload artifact
+              id: upload-artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz
+                  path: backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz
+        outputs:
+            artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}

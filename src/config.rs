@@ -4,8 +4,9 @@ use crate::device_filter::KeyExpr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use toml::Value;
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct AppConfig {
     #[serde(default)]
     pub input: InputConfig,
@@ -16,6 +17,95 @@ pub struct AppConfig {
     /// Per-device configurations for filtering and remapping
     #[serde(default)]
     pub device: HashMap<String, DeviceConfig>,
+    /// External helper processes ("plugins") that Backflow will spawn and integrate as
+    /// additional input/feedback peers.
+    ///
+    /// Each entry spawns one child process whose stdin/stdout speak the standard Backflow
+    /// JSON line protocol (identical to the WebSocket + UDS transports). This lets you extend
+    /// Backflow without modifying the core codebase – ideal for rapid prototyping of custom
+    /// hardware bridges, converters, or experimental mappers.
+    ///
+    /// Basic example:
+    ///
+    /// ```toml
+    /// [[plugins]]
+    /// command = "/usr/local/bin/my-midi-adapter"
+    /// args = ["--device", "hw:1,0,0"]
+    ///
+    /// [[plugins]]
+    /// command = "./target/release/custom_source"
+    /// # args = []   # (empty by default)
+    /// ```
+    ///
+    /// Runtime behavior:
+    /// - Backflow spawns the process with piped stdin/stdout (stderr is inherited for logs).
+    /// - Each newline-delimited UTF‑8 JSON message coming from the plugin stdout is parsed as an
+    ///   inbound event or control frame.
+    /// - Backflow sends outbound messages (feedback, acknowledgements, etc.) as single-line JSON
+    ///   objects to the plugin stdin.
+    /// - If a plugin exits, Backflow currently logs the termination (no auto‑restart yet).
+    ///
+    /// Protocol expectations:
+    /// - The same message envelopes used by existing transports (e.g. `{ "type": "input", ... }`).
+    /// - Control messages like `UpdateInputDIDFilter` / `UpdateStreamRegistration` are supported.
+    ///
+    /// Notes & future extensions (not yet implemented – subject to change):
+    /// - Optional per‑plugin working directory / environment overrides
+    /// - Auto‑restart / backoff policies
+    /// - Explicit plugin ID or stream namespace prefixes
+    /// - Graceful shutdown signals
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
+
+    /// Global Plugin config, not used by Backflow itself
+    #[serde(default)]
+    pub plugin_settings: HashMap<String, Value>,
+}
+
+/// Configuration for a single plugin process.
+///
+/// A plugin is an external executable that speaks Backflow's line‑delimited JSON protocol over
+/// its stdin/stdout. Backflow launches it, wires a `StdioBackend` to its pipes, and treats it as
+/// another transport peer (just like a WebSocket or Unix domain socket client).
+///
+/// Minimal example (TOML):
+/// ```toml
+/// [[plugins]]
+/// command = "./target/release/my-plugin"
+/// args = ["--verbose"]
+/// ```
+///
+/// Message format: identical to other transports. For instance an input batch:
+/// ```json
+/// {"type":"input","packet":{"device_id":"my_dev","timestamp":12345,"events":[{"key":"KEY_A","pressed":true}]}}
+/// ```
+///
+/// Or a control frame to register for streams:
+/// ```json
+/// {"type":"control","control":{"command":"UpdateStreamRegistration","register_streams":["uinput"],"unregister_streams":[]}}
+/// ```
+///
+/// Field notes:
+/// - `command`: Executable path (absolute or relative to current working directory when Backflow starts).
+/// - `args`: Optional CLI arguments (defaults to empty). Omit the field or use an empty array for none.
+///
+/// Lifecycle:
+/// - Spawned once during backend initialization.
+/// - On exit, Backflow logs the status; restart logic is not implemented.
+///
+/// Guidelines for plugin authors:
+/// - Write one JSON object per line. Avoid buffering without flushing newlines.
+/// - Treat unknown outbound message types as opaque (forward compatible).
+/// - Keep stdout strictly protocol; send human logs to stderr.
+/// - Exit cleanly on EOF from stdin (Backflow shutdown).
+///
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PluginConfig {
+    /// Path to the plugin executable
+    pub command: String,
+    /// Optional CLI arguments to pass to the plugin, if need be.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl AppConfig {
@@ -101,7 +191,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct InputConfig {
     #[serde(default = "default_web_enabled")]
     pub web: Option<WebBackend>,
@@ -127,7 +217,7 @@ fn default_web_enabled() -> Option<WebBackend> {
     Some(WebBackend::default())
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct OutputConfig {
     #[serde(default)]
     pub uinput: UInputConfig,
@@ -135,7 +225,7 @@ pub struct OutputConfig {
     pub chuniio_proxy: Option<ChuniioProxyConfig>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct UnixDomainSocketConfig {
     #[serde(default = "default_unix_socket_path")]
     pub path: PathBuf,
@@ -156,7 +246,7 @@ fn default_unix_socket_path() -> PathBuf {
 }
 
 // set web.enabled = false in [input.web] to explicitly disable the web backend
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WebBackend {
     #[serde(default = "default_web_enabled_bool")]
     pub enabled: bool,
@@ -188,7 +278,7 @@ fn default_web_host() -> String {
     "0.0.0.0".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UInputConfig {
     pub enabled: bool,
 }
@@ -199,7 +289,7 @@ impl Default for UInputConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct FeedbackConfig {
     // CHUNIIO RGB feedback socket
     pub chuniio: Option<ChuniIoRgbConfig>,
@@ -332,7 +422,7 @@ impl Default for DeviceConfig {
         }
     }
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChuniioProxyConfig {
     #[serde(default = "default_chuniio_proxy_enabled")]
     pub enabled: bool,
@@ -370,7 +460,7 @@ fn default_chuniio_proxy_socket_path() -> PathBuf {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmUdpConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,
@@ -390,7 +480,7 @@ fn default_brokenithm_host() -> String {
     "0.0.0.0".to_string()
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmIdeviceConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,
@@ -402,7 +492,7 @@ pub struct BrokenithmIdeviceConfig {
     pub udid: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct BrokenithmConfig {
     #[serde(default = "default_brokenithm_enabled")]
     pub enabled: bool,

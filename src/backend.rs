@@ -4,15 +4,15 @@
 
 use crate::config::AppConfig;
 use crate::device_filter::DeviceFilter;
-use crate::feedback::FeedbackEventStream;
 use crate::feedback::generators::chuni_jvs::ChuniLedDataPacket;
-use crate::input::{InputBackend, InputEventStream};
+use crate::input::io_server::{IoEventServer, IoOutboundMessage};
+use crate::input::{InputBackend, InputEventPacket, InputEventStream};
 use crate::output::{OutputBackend, OutputBackendType};
 use eyre::Result;
 use futures::future::select_all;
-use rustc_hash::FxHashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -167,52 +167,40 @@ impl Default for EventRouter {
         Self::new()
     }
 }
-/// Message streams container for passing around shared streams
+/// Message streams container maintaining per-output backend input streams
 #[derive(Clone)]
 pub struct MessageStreams {
-    /// Raw input events from all input backends
-    pub raw_input: InputEventStream,
-    /// Feedback events for all backends
-    pub feedback: FeedbackEventStream,
     /// Output streams keyed by backend name
-    output_streams: FxHashMap<String, InputEventStream>,
+    output_streams: std::collections::HashMap<String, InputEventStream>,
 }
 
 impl MessageStreams {
-    /// Create a new MessageStreams with default output backends
     pub fn new() -> Self {
-        let mut output_streams = FxHashMap::default();
-
-        // Register default output stream backends
+        let mut output_streams = std::collections::HashMap::new();
+        // Default backends
         output_streams.insert("uinput".to_string(), InputEventStream::new());
         output_streams.insert("chuniio".to_string(), InputEventStream::new());
-
-        Self {
-            raw_input: InputEventStream::new(),
-            feedback: FeedbackEventStream::new(),
-            output_streams,
-        }
+        Self { output_streams }
     }
-
-    /// Register a new output stream for a backend
+    /// Ensure a stream exists for the given backend name; returns true if newly created.
+    pub fn ensure_stream(&mut self, backend_name: &str) -> bool {
+        if self.output_streams.contains_key(backend_name) {
+            return false;
+        }
+        self.output_streams
+            .insert(backend_name.to_string(), InputEventStream::new());
+        true
+    }
     pub fn register_output_stream(&mut self, backend_name: &str) -> InputEventStream {
         let stream = InputEventStream::new();
         self.output_streams
             .insert(backend_name.to_string(), stream.clone());
         stream
     }
-
-    /// Get an output stream by backend name
-    pub fn get_output_stream(&self, backend_name: &str) -> Option<&InputEventStream> {
-        self.output_streams.get(backend_name)
-    }
-
-    /// Get a cloned output stream by backend name (for moving into async tasks)
     pub fn clone_output_stream(&self, backend_name: &str) -> Option<InputEventStream> {
         self.output_streams.get(backend_name).cloned()
     }
-
-    /// Get all registered output backend names
+    #[allow(dead_code)]
     pub fn output_backend_names(&self) -> impl Iterator<Item = &String> {
         self.output_streams.keys()
     }
@@ -227,25 +215,44 @@ impl Default for MessageStreams {
 /// Represents the actual backend service
 pub struct Backend {
     config: AppConfig,
-    streams: MessageStreams,
     device_filter: DeviceFilter,
     event_router: EventRouter,
     service_manager: ServiceManager,
+    io_server: Arc<IoEventServer>,
+    streams: MessageStreams,
 }
 
 impl Backend {
     /// Create a new backend from configuration
     pub fn new(config: AppConfig) -> Self {
         let device_filter = DeviceFilter::new(&config);
-        let streams = MessageStreams::new();
         let event_router = EventRouter::new();
 
+        let io_server = Arc::new(IoEventServer::with_config(Arc::new(config.clone())));
+        // Spawn unified IO server processing loop now (bridged below)
+        let io_server_clone = io_server.clone();
+        tokio::spawn(async move {
+            if let Err(e) = io_server_clone.run_forever().await {
+                tracing::error!("IoEventServer error: {}", e);
+            }
+        });
+        // Initialize message streams (defaults for built-in backends)
+        let mut streams = MessageStreams::new();
+        // Auto-register any additional backend names referenced in device config
+        // so routing can emit to them without needing an output service yet.
+        // This makes adding future output backends config-first.
+        for (_dev_id, dev_cfg) in &config.device {
+            let backend_name = dev_cfg.map_backend.as_str();
+            // Ensure a stream exists for each referenced backend.
+            streams.ensure_stream(backend_name);
+        }
         Self {
             config,
-            streams,
             device_filter,
             event_router,
             service_manager: ServiceManager::new(),
+            io_server,
+            streams,
         }
     }
 
@@ -274,12 +281,10 @@ impl Backend {
 
         let (led_packet_tx, led_packet_rx) =
             crate::feedback::generators::chuni_jvs::create_chuni_led_channel();
-
-        // Start all services, managed by the ServiceManager
         self.start_input_services();
-        self.start_device_filter_service();
         self.start_output_services(led_packet_tx);
         self.start_feedback_services(led_packet_rx);
+        self.start_routing_service();
 
         tracing::info!("All backend services started successfully");
         Ok(())
@@ -287,6 +292,83 @@ impl Backend {
 
     /// Start input services based on configuration
     fn start_input_services(&mut self) {
+        // Spawn plugin processes (each with its own stdio transport) if configured
+        if !self.config.plugins.is_empty() {
+            let plugins = self.config.plugins.clone();
+            for (idx, plugin) in plugins.into_iter().enumerate() {
+                let io_server = self.io_server.clone();
+                let command = plugin.command.clone();
+                let args = plugin.args.clone();
+                let client_id = format!(
+                    "plugin:{idx}:{}",
+                    std::path::Path::new(&command)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                );
+                self.spawn_service(&format!("plugin_stdio:{client_id}"), async move {
+                    use tokio::process::Command;
+                    use tracing::{error, info, warn};
+                    info!(%command, ?args, %client_id, "Spawning plugin process (stdio backend)");
+                    let mut child = match Command::new(&command)
+                        .args(&args)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                    {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(%command, error=%e, "Failed to spawn plugin process");
+                            return;
+                        }
+                    };
+                    let stdout = match child.stdout.take() {
+                        Some(s) => s,
+                        None => {
+                            error!(%command, "Plugin stdout unavailable");
+                            return;
+                        }
+                    };
+                    let stdin = match child.stdin.take() {
+                        Some(s) => s,
+                        None => {
+                            error!(%command, "Plugin stdin unavailable");
+                            return;
+                        }
+                    };
+                    // stderr -> log lines
+                    if let Some(stderr) = child.stderr.take() {
+                        let cid = client_id.clone();
+                        tokio::spawn(async move {
+                            use tokio::io::{AsyncBufReadExt, BufReader};
+                            let mut lines = BufReader::new(stderr).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                if line.trim().is_empty() {
+                                    continue;
+                                }
+                                warn!(%cid, "[plugin stderr] {line}");
+                            }
+                        });
+                    }
+                    // Run stdio backend for this plugin
+                    let mut backend = crate::input::stdio::StdioBackend::with_streams(
+                        client_id.clone(),
+                        stdout,
+                        stdin,
+                        io_server.clone(),
+                    );
+                    if let Err(e) = backend.run().await {
+                        error!(%client_id, error=%e, "Plugin stdio backend error");
+                    }
+                    match child.wait().await {
+                        Ok(status) => info!(%client_id, ?status, "Plugin process exited"),
+                        Err(e) => error!(%client_id, error=%e, "Failed waiting for plugin exit"),
+                    }
+                });
+            }
+        }
+
         // Start web input backend if configured and enabled
         if let Some(web_config) = &self.config.input.web {
             if web_config.enabled {
@@ -337,15 +419,12 @@ impl Backend {
         let bind_addr_str = format!("{host}:{port}");
         tracing::info!("Starting web input backend on {bind_addr_str}");
 
-        let input_stream = self.streams.raw_input.clone();
-        let feedback_stream = self.streams.feedback.clone();
-
+        let io_server = self.io_server.clone();
         self.spawn_service("web_input", async move {
             match bind_addr_str.parse::<SocketAddr>() {
                 Ok(bind_addr) => {
                     use crate::input::web::WebServer;
-                    let mut ws_backend =
-                        WebServer::auto_detect_web_ui(bind_addr, input_stream, feedback_stream);
+                    let mut ws_backend = WebServer::auto_detect_web_ui(bind_addr, io_server);
                     if let Err(e) = ws_backend.run().await {
                         tracing::error!("WebSocket backend error: {}", e);
                     }
@@ -360,13 +439,10 @@ impl Backend {
     /// Start Unix socket input service with parameters
     fn start_unix_socket_service_with_params(&mut self, path: std::path::PathBuf) {
         tracing::info!("Starting unix socket input backend at {}", path.display());
-
-        let input_stream = self.streams.raw_input.clone();
-        let feedback_stream = self.streams.feedback.clone();
-
+        let io_server = self.io_server.clone();
         self.spawn_service("unix_socket", async move {
             use crate::input::unix_socket::UnixSocketServer;
-            let mut unix_backend = UnixSocketServer::new(path, input_stream, feedback_stream);
+            let mut unix_backend = UnixSocketServer::new(path, io_server);
             if let Err(e) = unix_backend.run().await {
                 tracing::error!("Unix socket backend error: {}", e);
             }
@@ -395,19 +471,13 @@ impl Backend {
     fn start_brokenithm_tcp_service_with_params(&mut self, host: String, port: u16) {
         let connect_addr_str = format!("{host}:{port}");
         tracing::info!("Starting Brokenithm TCP client backend to {connect_addr_str}");
-
-        let input_stream = self.streams.raw_input.clone();
-        let feedback_stream = self.streams.feedback.clone();
-
+        let io_server = self.io_server.clone();
         self.spawn_service("brokenithm_tcp", async move {
             match connect_addr_str.parse::<SocketAddr>() {
                 Ok(connect_addr) => {
-                    use crate::input::brokenithm::{BrokenithmTcpBackend, BrokenithmTcpConfig};
-                    let mut backend = BrokenithmTcpBackend::new(
-                        BrokenithmTcpConfig::Client { connect_addr },
-                        input_stream,
-                        feedback_stream,
-                    );
+                    use crate::input::brokenithm::BrokenithmTcpBackend;
+                    let inbound_tx = io_server.inbound_sender();
+                    let mut backend = BrokenithmTcpBackend::client(connect_addr, inbound_tx);
                     if let Err(e) = backend.run().await {
                         tracing::error!("Brokenithm TCP client backend error: {}", e);
                     }
@@ -433,20 +503,12 @@ impl Backend {
             udid
         );
 
-        let input_stream = self.streams.raw_input.clone();
-        let feedback_stream = self.streams.feedback.clone();
-
+        let io_server = self.io_server.clone();
         self.spawn_service("brokenithm_idevice", async move {
-            use crate::input::brokenithm::{BrokenithmTcpBackend, BrokenithmTcpConfig};
-            let mut backend = BrokenithmTcpBackend::new(
-                BrokenithmTcpConfig::DeviceProxy {
-                    local_port,
-                    device_port,
-                    udid,
-                },
-                input_stream,
-                feedback_stream,
-            );
+            use crate::input::brokenithm::BrokenithmTcpBackend;
+            let inbound_tx = io_server.inbound_sender();
+            let mut backend =
+                BrokenithmTcpBackend::device_proxy(local_port, device_port, udid, inbound_tx);
             if let Err(e) = backend.run().await {
                 tracing::error!("Brokenithm iDevice client backend error: {}", e);
             }
@@ -454,76 +516,50 @@ impl Backend {
     }
 
     /// Start device filter and routing service that transforms raw input events and routes them to appropriate backends
-    fn start_device_filter_service(&mut self) {
-        tracing::info!("Starting device filter and routing service");
-
-        let raw_input_stream = self.streams.raw_input.clone();
-        let streams_for_routing = self.streams.clone();
+    fn start_routing_service(&mut self) {
+        tracing::info!("Starting unified routing service (IoEventServer -> output backends)");
+        let io_server = self.io_server.clone();
         let device_filter = self.device_filter.clone();
         let event_router = self.event_router.clone();
-
-        self.service_manager.spawn(async move {
-            loop {
-                // Receive from raw input stream
-                if let Some(packet) = raw_input_stream.receive().await {
-                    match device_filter.transform_packet(packet) {
-                        Ok(transformed_packet) => {
-                            // Group events by destination backend
-                            let mut backend_events: FxHashMap<String, Vec<crate::input::InputEvent>> = FxHashMap::default();
-
-                            for event in &transformed_packet.events {
-                                if let Some(backend_name) = event_router.route_event(event, Some(&device_filter), &transformed_packet.device_id) {
-                                    backend_events.entry(backend_name)
-                                        .or_default()
-                                        .push(event.clone());
-                                }
-                            }
-
-                            // Send events to their respective backends
-                            for (backend_name, events) in backend_events {
-                                if let Some(output_stream) = streams_for_routing.clone_output_stream(&backend_name) {
-                                    let packet = crate::input::InputEventPacket {
-                                        device_id: transformed_packet.device_id.clone(),
-                                        timestamp: transformed_packet.timestamp,
-                                        events,
-                                    };
-
-                                    tracing::trace!(
-                                        "Routing {} events from device '{}' to {} backend",
-                                        packet.events.len(),
-                                        packet.device_id,
-                                        backend_name
-                                    );
-                                    let span = tracing::span!(
-                                        tracing::Level::TRACE,
-                                        "send_packet_to_backend",
-                                        backend = %backend_name,
-                                        device_id = %packet.device_id,
-                                        event_count = packet.events.len()
-                                    );
-                                    let _enter = span.enter();
-                                    if let Err(e) = output_stream.send(packet).await {
-                                        tracing::error!(
-                                            "Failed to send packet to {} backend: {}",
-                                            backend_name, e
-                                        );
+        let streams = self.streams.clone();
+        self.spawn_service("routing_service", async move {
+            if let Some(mut outbound_rx) = io_server.take_outbound_receiver().await {
+                while let Some(msg) = outbound_rx.recv().await {
+                    match msg {
+                        IoOutboundMessage::Input(pkt) => {
+                            match device_filter.transform_packet(pkt) {
+                                Ok(transformed_packet) => {
+                                    // Group by backend
+                                    let mut by_backend: std::collections::HashMap<String, Vec<crate::input::InputEvent>> = std::collections::HashMap::new();
+                                    for ev in &transformed_packet.events {
+                                        if let Some(backend_name) = event_router.route_event(ev, Some(&device_filter), &transformed_packet.device_id) {
+                                            by_backend.entry(backend_name).or_default().push(ev.clone());
+                                        }
                                     }
-                                } else {
-                                    tracing::warn!(
-                                        "No output stream registered for backend '{}', dropping {} events",
-                                        backend_name, events.len()
-                                    );
+                                    for (backend, events) in by_backend {
+                                        if events.is_empty() { continue; }
+                                        if let Some(stream) = streams.clone_output_stream(&backend) {
+                                            let packet = InputEventPacket { device_id: transformed_packet.device_id.clone(), timestamp: transformed_packet.timestamp, events };
+                                            if let Err(e) = stream.send(packet.clone()).await { tracing::error!("Failed to send packet to backend {backend}: {e}"); }
+                                            // Mirror to client subscribers of this backend/topic
+                                            io_server.broadcast_stream_input(&backend, &packet);
+                                            // Also mirror to device listeners (clients that did not register streams)
+                                            io_server.broadcast_device_input(&packet);
+                                        } else {
+                                            tracing::warn!("No stream registered for backend {backend}, dropping events");
+                                        }
+                                    }
                                 }
+                                Err(e) => tracing::error!("Failed to transform packet: {e}"),
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to transform packet: {}", e);
+                        IoOutboundMessage::Feedback(_fb) => {
+                            // Already dispatched to clients; no output backend consumes feedback currently
                         }
                     }
-                } else {
-                    tracing::debug!("Raw input stream closed, shutting down device filter");
-                    break;
                 }
+            } else {
+                tracing::warn!("Failed to obtain IoEventServer outbound receiver; routing inactive");
             }
         });
     }
@@ -554,8 +590,7 @@ impl Backend {
         let input_stream = self
             .streams
             .clone_output_stream("uinput")
-            .expect("uinput output stream should be registered");
-
+            .expect("uinput stream registered");
         self.spawn_service("uinput_output", async move {
             let output_result = crate::output::udev::UdevOutput::new(input_stream);
             match output_result {
@@ -592,15 +627,13 @@ impl Backend {
         let input_stream = self
             .streams
             .clone_output_stream("chuniio")
-            .expect("chuniio output stream should be registered");
-        let feedback_stream = self.streams.feedback.clone();
+            .expect("chuniio stream registered");
 
         self.spawn_service("chuniio_proxy", async move {
             let mut output = OutputBackendType::ChuniioProxy(
                 crate::output::chuniio_proxy::ChuniioProxyServer::new(
                     socket_path,
                     input_stream,
-                    feedback_stream,
                     led_packet_tx,
                 ),
             );
@@ -651,7 +684,7 @@ impl Backend {
         );
 
         let config = chuniio_config.clone();
-        let feedback_stream = self.streams.feedback.clone();
+        let io_server = self.io_server.clone();
         let socket_path = socket_path.clone();
 
         // Create a new channel for the JVS reader to send packets
@@ -670,7 +703,7 @@ impl Backend {
         // Start RGB service fed by JVS reader
         self.spawn_service("chuniio_rgb_service", async move {
             use crate::feedback::generators::chuni_jvs::run_chuniio_service;
-            if let Err(e) = run_chuniio_service(config, feedback_stream, jvs_led_rx).await {
+            if let Err(e) = run_chuniio_service(config, io_server, jvs_led_rx).await {
                 tracing::error!("ChuniIO RGB feedback service error: {}", e);
             }
         });
@@ -688,11 +721,11 @@ impl Backend {
         tracing::info!("Starting ChuniIO RGB feedback service (fed by chuniio_proxy, no socket)");
 
         let config = chuniio_config.clone();
-        let feedback_stream = self.streams.feedback.clone();
+        let io_server = self.io_server.clone();
 
         self.spawn_service("chuniio_rgb_service", async move {
             use crate::feedback::generators::chuni_jvs::run_chuniio_service;
-            if let Err(e) = run_chuniio_service(config, feedback_stream, led_packet_rx).await {
+            if let Err(e) = run_chuniio_service(config, io_server, led_packet_rx).await {
                 tracing::error!("ChuniIO RGB feedback service error: {}", e);
             }
         });

@@ -9,4 +9,4 @@ zbus = "5"
 zvariant = "5"
 serde = { version = "1.0", features = ["derive"] }
 async-dropper = { version = "0.3", features = ["tokio", "derive"] }
-async-trait = "0.1.88"
+async-trait = "~0.1"

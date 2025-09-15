@@ -4,9 +4,17 @@
 //!
 //! This module provides a TCP server/client that connects to Brokenithm clients,
 //! allowing them to send input events and receive updates.
+//!
+//! NOTE: This module will be deprecated and turned into a separate plugin.
+//!
+//! If you want to use a Brokenithm-like frontend on an iOS client, consider
+//! using the Web version, or the new plugin once complete
+//!
+//! This backend will be removed once the dedicated plugin is complete.
 
-use crate::feedback::{FeedbackEvent, FeedbackEventPacket, FeedbackEventStream, LedEvent};
-use crate::input::{InputBackend, InputEvent, InputEventPacket, InputEventStream, KeyboardEvent};
+use crate::feedback::{FeedbackEvent, FeedbackEventPacket, LedEvent};
+use crate::input::io_server::IoInboundMessage;
+use crate::input::{InputBackend, InputEvent, InputEventPacket, KeyboardEvent};
 use crate::output::rgb_to_brg;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
@@ -90,8 +98,8 @@ pub async fn set_brokenithm_state(new_state: BoardInputState) {
 
 pub struct BrokenithmTcpBackend {
     pub config: BrokenithmTcpConfig,
-    pub input_stream: InputEventStream,
-    pub feedback_stream: FeedbackEventStream,
+    /// Inbound sender into unified IoEventServer (produces IoInboundMessage::Input)
+    pub inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,46 +119,30 @@ pub enum BrokenithmTcpConfig {
 impl BrokenithmTcpBackend {
     pub fn new(
         config: BrokenithmTcpConfig,
-        input_stream: InputEventStream,
-        feedback_stream: FeedbackEventStream,
+        inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
     ) -> Self {
-        Self {
-            config,
-            input_stream,
-            feedback_stream,
-        }
+        Self { config, inbound_tx }
     }
 
     pub fn server(
         bind_addr: SocketAddr,
-        input_stream: InputEventStream,
-        feedback_stream: FeedbackEventStream,
+        inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
     ) -> Self {
-        Self::new(
-            BrokenithmTcpConfig::Server { bind_addr },
-            input_stream,
-            feedback_stream,
-        )
+        Self::new(BrokenithmTcpConfig::Server { bind_addr }, inbound_tx)
     }
 
     pub fn client(
         connect_addr: SocketAddr,
-        input_stream: InputEventStream,
-        feedback_stream: FeedbackEventStream,
+        inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
     ) -> Self {
-        Self::new(
-            BrokenithmTcpConfig::Client { connect_addr },
-            input_stream,
-            feedback_stream,
-        )
+        Self::new(BrokenithmTcpConfig::Client { connect_addr }, inbound_tx)
     }
 
     pub fn device_proxy(
         local_port: u16,
         device_port: u16,
         udid: Option<String>,
-        input_stream: InputEventStream,
-        feedback_stream: FeedbackEventStream,
+        inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
     ) -> Self {
         Self::new(
             BrokenithmTcpConfig::DeviceProxy {
@@ -158,8 +150,7 @@ impl BrokenithmTcpBackend {
                 device_port,
                 udid,
             },
-            input_stream,
-            feedback_stream,
+            inbound_tx,
         )
     }
 }
@@ -211,10 +202,7 @@ impl InputBackend for BrokenithmTcpBackend {
 
         match self.config.clone() {
             BrokenithmTcpConfig::Server { bind_addr } => self.run_server(bind_addr).await,
-            BrokenithmTcpConfig::Client { connect_addr } => {
-                self.run_client(connect_addr, self.feedback_stream.clone())
-                    .await
-            }
+            BrokenithmTcpConfig::Client { connect_addr } => self.run_client(connect_addr).await,
             BrokenithmTcpConfig::DeviceProxy {
                 local_port,
                 device_port,
@@ -232,42 +220,9 @@ impl BrokenithmTcpBackend {
         let listener = TcpListener::bind(bind_addr).await?;
         tracing::info!("Brokenithm TCP backend listening on {}", bind_addr);
 
-        // Shared client list for feedback broadcast
+        // Legacy feedback broadcast removed
         let clients: Arc<RwLock<Vec<Arc<tokio::sync::Mutex<tokio::net::TcpStream>>>>> =
             Arc::new(RwLock::new(Vec::new()));
-        let feedback_stream = self.feedback_stream.clone();
-        let feedback_stream_clone = feedback_stream.clone();
-        let clients_clone = clients.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match feedback_stream_clone.receive().await {
-                    Some(feedback) => {
-                        let led_msg = led_feedback_to_cled(&feedback);
-                        let mut to_remove = Vec::new();
-                        let clients_guard = clients_clone.read().await;
-                        for (idx, client_mutex) in clients_guard.iter().enumerate() {
-                            let mut client = client_mutex.lock().await;
-                            if let Err(e) = client.write_all(&led_msg).await {
-                                tracing::warn!("Failed to send feedback to client: {}", e);
-                                to_remove.push(idx);
-                            }
-                        }
-                        drop(clients_guard);
-                        if !to_remove.is_empty() {
-                            let mut clients_guard = clients_clone.write().await;
-                            for &idx in to_remove.iter().rev() {
-                                clients_guard.remove(idx);
-                            }
-                        }
-                    }
-                    None => {
-                        tracing::info!("Feedback stream closed, stopping feedback broadcast task");
-                        break;
-                    }
-                }
-            }
-        });
 
         loop {
             let (socket, addr) = listener.accept().await?;
@@ -282,31 +237,27 @@ impl BrokenithmTcpBackend {
 
             let clients_for_removal = clients.clone();
             let client_mutex_for_removal = client_mutex.clone();
-            let feedback_stream_clone = feedback_stream.clone();
-
+            let inbound_tx = self.inbound_tx.clone();
             tokio::spawn(async move {
                 Self::handle_connection(
                     client_mutex,
                     Some((clients_for_removal, client_mutex_for_removal)),
                     Some(addr),
-                    feedback_stream_clone,
+                    inbound_tx,
                 )
                 .await;
             });
         }
     }
 
-    async fn run_client(
-        &mut self,
-        connect_addr: SocketAddr,
-        feedback_stream: FeedbackEventStream,
-    ) -> eyre::Result<()> {
+    async fn run_client(&mut self, connect_addr: SocketAddr) -> eyre::Result<()> {
         loop {
             match TcpStream::connect(connect_addr).await {
                 Ok(socket) => {
                     tracing::info!("Connected to Brokenithm device at {}", connect_addr);
                     let socket = Arc::new(tokio::sync::Mutex::new(socket));
-                    Self::handle_connection(socket, None, None, feedback_stream.clone()).await;
+                    let inbound_tx = self.inbound_tx.clone();
+                    Self::handle_connection(socket, None, None, inbound_tx).await;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -344,7 +295,8 @@ impl BrokenithmTcpBackend {
                         connect_addr
                     );
                     let socket = Arc::new(tokio::sync::Mutex::new(socket));
-                    Self::handle_connection(socket, None, None, self.feedback_stream.clone()).await;
+                    let inbound_tx = self.inbound_tx.clone();
+                    Self::handle_connection(socket, None, None, inbound_tx).await;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -362,31 +314,8 @@ impl BrokenithmTcpBackend {
         socket: Arc<tokio::sync::Mutex<TcpStream>>,
         client_cleanup: Option<ClientCleanup>,
         addr: Option<SocketAddr>,
-        feedback_stream: FeedbackEventStream,
+        inbound_tx: tokio::sync::mpsc::UnboundedSender<IoInboundMessage>,
     ) {
-        let socket_for_feedback = socket.clone();
-
-        // Start feedback listening task
-        let feedback_stream_clone = feedback_stream.clone();
-        let feedback_task = tokio::spawn(async move {
-            loop {
-                match feedback_stream_clone.receive().await {
-                    Some(feedback) => {
-                        let led_msg = led_feedback_to_cled(&feedback);
-                        let mut socket_guard = socket_for_feedback.lock().await;
-                        if let Err(e) = socket_guard.write_all(&led_msg).await {
-                            tracing::warn!("Failed to send feedback: {e}");
-                            break;
-                        }
-                    }
-                    None => {
-                        tracing::info!("Feedback stream closed");
-                        break;
-                    }
-                }
-            }
-        });
-
         let mut buffer = Vec::new();
         let mut read_buf = [0u8; 256];
         let mut state_tracker = BrokenithmInputStateTracker::new();
@@ -400,7 +329,6 @@ impl BrokenithmTcpBackend {
                     } else {
                         tracing::info!("Connection closed by remote");
                     }
-                    feedback_task.abort();
 
                     // Remove this client from the shared list if it's a server connection
                     if let Some((clients_for_removal, client_mutex_for_removal)) = client_cleanup {
@@ -441,8 +369,18 @@ impl BrokenithmTcpBackend {
                                     test_button,
                                     service_button,
                                 ) {
-                                    // Don't send input events when using shared state polling
-                                    // let _ = input_stream.send(packet).await;
+                                    // Emit into unified IoEventServer
+                                    if let Some(packet) = state_tracker.diff_and_packet(
+                                        &air,
+                                        &slider,
+                                        test_button,
+                                        service_button,
+                                    ) {
+                                        let _ = inbound_tx.send(IoInboundMessage::Input {
+                                            client_id: "brokenithm".to_string(),
+                                            packet,
+                                        });
+                                    }
                                 }
                                 // Always update shared state regardless of event emission
                                 state_tracker.update_shared_state(test_button, service_button);
@@ -463,8 +401,17 @@ impl BrokenithmTcpBackend {
                                     test_button,
                                     service_button,
                                 ) {
-                                    // Don't send input events when using shared state polling
-                                    // let _ = input_stream.send(packet).await;
+                                    if let Some(packet) = state_tracker.diff_and_packet(
+                                        &air,
+                                        &slider,
+                                        test_button,
+                                        service_button,
+                                    ) {
+                                        let _ = inbound_tx.send(IoInboundMessage::Input {
+                                            client_id: "brokenithm".to_string(),
+                                            packet,
+                                        });
+                                    }
                                 }
                                 // Always update shared state after coin pulse
                                 state_tracker.update_shared_state(test_button, service_button);
@@ -488,7 +435,7 @@ impl BrokenithmTcpBackend {
                 }
                 Err(e) => {
                     tracing::error!("TCP read error: {}", e);
-                    feedback_task.abort();
+
                     break;
                 }
             }

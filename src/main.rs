@@ -1,6 +1,7 @@
 mod backend;
 mod config;
 mod device_filter;
+mod error;
 mod feedback;
 mod input;
 mod output;

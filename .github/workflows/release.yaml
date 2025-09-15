@@ -1,0 +1,29 @@
+name: Release binaries
+
+permissions:
+    contents: write
+    packages: write
+    id-token: write
+
+on:
+    release:
+        types:
+            - released
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        container:
+            image: ghcr.io/terrapkg/builder:f42
+        steps:
+            - name: Build binaries
+              id: build
+              uses: ./.github/workflows/build.yaml
+              with:
+                  tag: ${{ github.event.release.tag_name }}
+
+            - name: Release
+              uses: softprops/action-gh-release@v2
+              if: github.ref_type == 'tag'
+              with:
+                  files: "*.tar.gz"

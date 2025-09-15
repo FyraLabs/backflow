@@ -1,15 +1,23 @@
 name: Rust
 
 permissions:
-  security-events: write
+    security-events: write
 
 on:
-  push:
-  pull_request:
+    push:
+    pull_request:
 
 jobs:
-  rust:
-    uses: FyraLabs/actions/.github/workflows/rust.yml@main
-    with:
-      test-container: '{"image": "ghcr.io/terrapkg/builder:f42"}'
-      test-pre: dnf install -y clang-devel gcc mold cmake pkg-config libevdev-devel libudev-devel dbus-devel
+    rust:
+        uses: FyraLabs/actions/.github/workflows/rust.yml@main
+        with:
+            test-container: '{"image": "ghcr.io/terrapkg/builder:f42"}'
+            test-pre: dnf install -y clang-devel gcc mold cmake pkg-config libevdev-devel libudev-devel dbus-devel
+
+    build:
+        permissions:
+            contents: read
+            packages: write
+        uses: ./.github/workflows/build.yaml
+        with:
+            tag: git-${{ github.sha }}
