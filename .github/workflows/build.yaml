@@ -52,7 +52,7 @@ jobs:
                   tar czf backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz out/backflow-${{ inputs.tag }}-${{ runner.arch }}
             - name: Upload artifact
               id: upload-artifact
-              uses: actions/upload-artifact@v3
+              uses: actions/upload-artifact@v4
               with:
                   name: backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz
                   path: backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz
