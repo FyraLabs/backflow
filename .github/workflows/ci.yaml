@@ -15,6 +15,9 @@ jobs:
             test-pre: dnf install -y clang-devel gcc mold cmake pkg-config libevdev-devel libudev-devel dbus-devel
 
     build:
+        permissions:
+            contents: read
+            packages: write
         uses: ./.github/workflows/build.yaml
         with:
             tag: git-${{ github.sha }}
