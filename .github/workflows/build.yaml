@@ -38,7 +38,7 @@ jobs:
                   mkdir -p $outdir
                   cp target/release/backflow $outdir/
                   cp -a web/ $outdir/web
-                  tar czf backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz out/backflow-${{ inputs.tag }}-${{ runner.arch }}
+                  tar czf backflow-${{ inputs.tag }}-${{ runner.arch }}.tar.gz -C out backflow-${{ inputs.tag }}-${{ runner.arch }}
 
             - name: Upload artifact
               id: upload-artifact
