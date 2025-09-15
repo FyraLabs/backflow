@@ -16,7 +16,7 @@ jobs:
         container:
             image: ghcr.io/terrapkg/builder:f42
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@v5 
             - name: Build binaries
               id: build
               uses: ./.github/workflows/build.yaml
