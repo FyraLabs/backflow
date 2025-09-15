@@ -508,7 +508,9 @@ impl IoEventServer {
                 ClientControlMessage::GetConfig => {
                     // Non-mutating: send config snapshot
                     let cfg = (*self.app_config).clone();
-                    let _ = entry.outbound_tx.send(IoClientMessage::Config(Box::new(cfg)));
+                    let _ = entry
+                        .outbound_tx
+                        .send(IoClientMessage::Config(Box::new(cfg)));
                 }
             }
             // Emit centralized control_ack for mutating commands (excluding ListStreams)
