@@ -28,23 +28,20 @@ Together, they provide a flexible and modular input pipeline for gaming, accessi
 
 > TL;DR: Backflow lets you turn anything into an input device — from arcade sliders to browser touchpads — no kernel drivers required.
 
-## (Planned) Features
+## Features
 
-- **WebSocket server** for receiving input events
-- **PWA virtual gamepad server** using the WebSocket routing backend
+- **Multiple IPC/RPC transports** for receiving input events
+    - WebSocket routing backend for remote input over network
+    - Unix domain socket backend for local IPC
+    - Standard I/O pipe backend mode for managed plugins (as a binary or script)
+    - Experimental Wine bridge support for segatools, used for CHUNITHM slider/IR beam motion controls
+- **PWA virtual gamepad client** using the WebSocket routing backend
 - **Per-device filtering and key remapping** with configurable transformations
-  - Map custom keycodes to standard evdev codes
-  - Device-specific routing to different output backends
-  - Support for non-standard input devices with custom key definitions
-- **Modular input backends** with support for:
-  - Serial devices (e.g. RS232, UART, GPIO)
-  - MIDI instruments and controllers
-  - Analog input (e.g. joystick axes, potentiometers, rotary encoders, pedals)
-- **RGB feedback output** to various devices and protocols:
-  - [JVS](https://en.wikipedia.org/wiki/Japan_Amusement_Machine_and_Marketing_Association#Video)
-  - Novation MIDI hardware
-  - OpenRGB-compatible devices
-- **Input remapping and transformation**, using InputPlumber's configuration and virtual device system
+    - Map custom keycodes to standard evdev codes
+    - Device-specific routing to different output backends
+    - Support for non-standard input devices with custom key definitions
+- **Modular input backends** with support for any arbitrary input/output transport from any source to any client
+- **RGB feedback output** to various devices and protocols, supported by modular sink backends
 
 ## Getting Started
 
@@ -123,7 +120,7 @@ Receive feedback events for LEDs, haptics, etc.:
 
 ```json
 {
-    "device_id": "my_controller", 
+    "device_id": "my_controller",
     "timestamp": 1234567890123,
     "events": [
         {
@@ -159,7 +156,7 @@ device_type = "keyboard"
 
 [device."slider_controller".remap]
 "SLIDER_1" = "KEY_A"
-"SLIDER_2" = "KEY_S" 
+"SLIDER_2" = "KEY_S"
 "SLIDER_3" = "KEY_D"
 # ... more mappings
 
