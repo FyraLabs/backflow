@@ -6,6 +6,7 @@
 - Familiarity with (async) Rust (if you want to hack the backend)
 - A working Rust toolchain (see [Rustup](https://rustup.rs/))
 - uinput and evdev
+- Ability to read the source code, and its doc comments
 
 ### Architecture Overview
 
