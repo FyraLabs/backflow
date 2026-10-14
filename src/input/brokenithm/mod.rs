@@ -369,7 +369,6 @@ impl BrokenithmTcpBackend {
                                     test_button,
                                     service_button,
                                 ) {
-                                    // Emit into unified IoEventServer
                                     if let Some(packet) = state_tracker.diff_and_packet(
                                         &air,
                                         &slider,
